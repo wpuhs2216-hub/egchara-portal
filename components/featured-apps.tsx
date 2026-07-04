@@ -30,7 +30,7 @@ const categories: AppCategory[] = [
       { name: "山手線ゲーム", icon: Train, color: "from-emerald-500 to-green-500", href: "/yamanote/", comingSoon: false },
       { name: "ブラックジャック", icon: Spade, color: "from-indigo-500 to-violet-500", href: "/blackjack/", comingSoon: false },
       { name: "パーティー", icon: Users, color: "from-violet-500 to-fuchsia-500", href: "/party/", comingSoon: false },
-      { name: "6ボールパズル", icon: Hexagon, color: "from-sky-500 to-indigo-500", href: "/puzzle/", comingSoon: false },
+      { name: "6ボールパズル", icon: Hexagon, color: "from-sky-500 to-indigo-500", href: "/ramune-puzzle/", comingSoon: false },
       { name: "えぐラーメン食堂", icon: Soup, color: "from-orange-500 to-red-500", href: "/egramen/", comingSoon: false },
     ],
   },
