@@ -22,6 +22,8 @@
 - `/word-wolf/` → ワードウルフ
 - `/kingscup/` → キングスカップ
 - `/stamps/` → LINE スタンプ（portal自身のサブページ）
+- `/noxa/` → NOXA 構想紹介ページ（portal自身のサブページ・独自OG画像つき）
+- `/workspaces/` → ワークスペース紹介ページ（portal自身のサブページ）
 
 ## ディレクトリ構成
 - `app/` - Next.js ページ（トップ、stamps）

@@ -7,7 +7,8 @@ const nextConfig: NextConfig = {
         unoptimized: true,
     },
     typescript: {
-        // grind Day1: error ignore を外して実際の型エラーを可視化（0エラーなら false 維持）
+        // 型エラーをビルドゲートにする（恒久）。Day1〜7 で 0 エラーを確認済み。
+        // true に戻すのは禁止（エラーを隠すだけで直らない）。
         ignoreBuildErrors: false,
     },
     // 注(grind Day1): Next16 は NextConfig から `eslint` オプションを削除（`next lint` 廃止）。
