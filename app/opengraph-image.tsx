@@ -12,12 +12,12 @@ import path from 'path'
 // output: 'export' で静的ビルドに含めるため必要
 export const dynamic = 'force-static'
 
-export const alt = 'エグキャラ — 16体のエグかわ妖精たち。'
+export const alt = 'エグキャラ — 32体のエグかわ妖精たち。'
 export const size = { width: 1200, height: 630 }
 export const contentType = 'image/png'
 
 // OG 画像に描画するすべての日本語・英数字を列挙して subset で取得
-const OG_TEXT = '16体のエグかわ妖精たち自虐妖精語匂わせポエムで生まれたキャラクターegshugycom'
+const OG_TEXT = '32体のエグかわ妖精たち自虐妖精語匂わせポエムで生まれたキャラクターegshugycom'
 
 async function loadGoogleFont(family: string, weight: number, text: string): Promise<ArrayBuffer | null> {
   try {
@@ -118,7 +118,7 @@ export default async function OGImage() {
             zIndex: 1,
           }}
         >
-          16体のエグかわ妖精たち。
+          32体のエグかわ妖精たち。
         </div>
         <div
           style={{

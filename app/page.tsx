@@ -59,13 +59,13 @@ interface Product {
   meta: { label: string; value: string }[]
 }
 
-// エグタイプ 16 キャラ全員。正解データ: egtype/src/data/types.ts より
+// エグタイプ 32 キャラ全員。正解データ: egtype/src/data/types.ts + new-characters.ts より
 // dangerRank S → A → B → C 順に並べ替え（図鑑の主役）
 const ALL_CHARACTERS: Character[] = [
   { id: "GMCK", name: "ぶるとら", animal: "トラ", theme: "全賭け冒険家", catchphrase: "次は取り返すから", dangerRank: "S" },
   { id: "GRCK", name: "ごりおし", animal: "ゴリラ", theme: "圧の王様", catchphrase: "お前のためを思って言ってるんだ", dangerRank: "S" },
   { id: "GRCT", name: "ぺかりん", animal: "ペリカン", theme: "確率の奴隷", catchphrase: "今日はツイてる気がする", dangerRank: "S" },
-  { id: "BRWT", name: "らむむ", animal: "—", theme: "ふわふわの迷子", catchphrase: "いつでもやめられるし", dangerRank: "S" },
+  { id: "BRWT", name: "らむむ", animal: "ラムネ（羊）", theme: "ふわふわの迷子", catchphrase: "いつでもやめられるし", dangerRank: "S" },
   { id: "GMWT", name: "ちゅーた", animal: "ネズミ", theme: "善意の布教者", catchphrase: "これ本当にいいものなの！", dangerRank: "A" },
   { id: "BMCT", name: "もぐらし", animal: "モグラ", theme: "永遠の充電中", catchphrase: "明日から本気出す", dangerRank: "A" },
   { id: "BRCT", name: "ぐびおに", animal: "鬼", theme: "酔いの仮面", catchphrase: "もう一杯、ちょっとだけ", dangerRank: "A" },
@@ -78,6 +78,23 @@ const ALL_CHARACTERS: Character[] = [
   { id: "BMWK", name: "うらぴょん", animal: "ウサギ", theme: "星の操り人形", catchphrase: "水星が逆行してるから仕方ない", dangerRank: "C" },
   { id: "BRCK", name: "しゃっちー", animal: "シャチ", theme: "過労の歯車", catchphrase: "休んだら迷惑かかるから", dangerRank: "C" },
   { id: "BRWK", name: "すりよりす", animal: "リス", theme: "空気の奴隷", catchphrase: "みんながそう言ってるし", dangerRank: "C" },
+  // --- v2 追加の新16キャラ（2026-06 大改修。正解データ: egtype/src/data/new-characters.ts） ---
+  { id: "usoron", name: "でまろう", animal: "オオカミ", theme: "ゼロから作る作話", catchphrase: "いやそれ、本当はこうだったんだって", dangerRank: "A" },
+  { id: "mayakashi", name: "とぼけろん", animal: "カメレオン", theme: "論点スライドの達人", catchphrase: "あー、それはそれとして、さ", dangerRank: "A" },
+  { id: "seigin", name: "せいぎん", animal: "ペンギン", theme: "氷上の正しさ王様", catchphrase: "それ、間違ってると思うけど", dangerRank: "A" },
+  { id: "sokubaku", name: "おもうま", animal: "ウマ", theme: "手綱を離せない愛", catchphrase: "好きだから、ちゃんと知っておきたいだけ", dangerRank: "A" },
+  { id: "koizaru", name: "さかりざる", animal: "サル", theme: "刺激を渡り歩く", catchphrase: "ちょっと刺激が足りないだけ", dangerRank: "A" },
+  { id: "unubon", name: "なるしし", animal: "ライオン", theme: "鏡に恋する王", catchphrase: "うん、今日のわたし、わるくない。", dangerRank: "B" },
+  { id: "oregatari", name: "かたりんこ", animal: "インコ", theme: "会話の横取り名人", catchphrase: "あー、それで言うと俺の場合さ——", dangerRank: "B" },
+  { id: "jishoun", name: "わけあるま", animal: "アルマジロ", theme: "事後の言い訳職人", catchphrase: "やったのは僕だよ、ただちょっと訳があってさ", dangerRank: "B" },
+  { id: "raberu", name: "だからす", animal: "カラス", theme: "事前の予防線", catchphrase: "言っとくけど俺、そういうの無理な人だから", dangerRank: "B" },
+  { id: "gossip", name: "こそづる", animal: "ツル", theme: "陰でこそこそ", catchphrase: "ここだけの話なんだけどさ", dangerRank: "B" },
+  { id: "kawaiso", name: "かわいそ", animal: "カワウソ", theme: "悲劇の主役", catchphrase: "でも自分なんて、もっと大変でさ", dangerRank: "B" },
+  { id: "netami", name: "うらやぎ", animal: "ヤギ", theme: "隣の芝は青い", catchphrase: "いいなあ、自分なんて何もないのに", dangerRank: "B" },
+  { id: "shinpai", name: "ふあんこう", animal: "アンコウ", theme: "最悪の未来を上映", catchphrase: "もし、こうなったらどうしよう…", dangerRank: "B" },
+  { id: "dokechi", name: "けちぞう", animal: "ゾウ", theme: "一円も出さない蔵", catchphrase: "いや、それもったいないでしょ", dangerRank: "B" },
+  { id: "mashidori", name: "まだましか", animal: "アシカ", theme: "比べて安心", catchphrase: "まあ、それに比べたら自分はまだマシな方かな。", dangerRank: "C" },
+  { id: "heibon", name: "とくなし", animal: "カバ", theme: "特徴ゼロの巨体", catchphrase: "まあ、自分は特にないかな", dangerRank: "C" },
 ]
 
 // PRODUCTS: 夜職事業の関連プロダクト（SHOW_PRODUCTS=false の間は非表示）
@@ -223,7 +240,7 @@ export default function Home() {
         )}
       </nav>
 
-      {/* Hero: 16体のエグかわ妖精たち */}
+      {/* Hero: 32体のエグかわ妖精たち */}
       <section className="relative max-w-6xl mx-auto px-4 md:px-6 pt-16 md:pt-28 pb-12 md:pb-16 overflow-hidden">
         {/* 装飾: 粘土風のふわふわブロブ */}
         <div
@@ -274,12 +291,12 @@ export default function Home() {
               href="#characters"
               className="inline-flex items-center gap-2 px-8 py-4 bg-card border-[3px] border-border text-foreground font-display font-extrabold text-[16px] rounded-full clay-btn"
             >
-              16体を見る
+              32体を見る
             </a>
           </div>
         </div>
 
-        {/* Hero 直下: 16体の顔を横スクロールマーキーで即見せ（キャラ主役の証明） */}
+        {/* Hero 直下: 32体の顔を横スクロールマーキーで即見せ（キャラ主役の証明） */}
         <div className="relative mt-12 md:mt-16 -mx-4 md:-mx-6 overflow-hidden marquee-mask">
           <div className="flex gap-4 md:gap-5 marquee-track w-max py-2 px-4">
             {[...ALL_CHARACTERS, ...ALL_CHARACTERS].map((c, i) => (
@@ -333,7 +350,7 @@ export default function Home() {
         })()}
       </section>
 
-      {/* CHARACTERS: 16体の図鑑（サイトの主役・全員を一覧表示） */}
+      {/* CHARACTERS: 32体の図鑑（サイトの主役・全員を一覧表示） */}
       <section id="characters" className="max-w-6xl mx-auto px-4 md:px-6 py-16 md:py-24">
         <div className="flex items-end justify-between gap-6 mb-9 flex-col sm:flex-row">
           <div>
@@ -341,7 +358,7 @@ export default function Home() {
               <SectionPill color="var(--pop-pink)">キャラクター</SectionPill>
             </div>
             <h2 className="font-display font-black text-[clamp(30px,5.5vw,54px)] tracking-[-0.02em] leading-tight">
-              エグキャラ<span className="text-primary">図鑑</span>。全16体。
+              エグキャラ<span className="text-primary">図鑑</span>。全32体。
             </h2>
             <p className="mt-3 max-w-xl text-[15px] text-muted-foreground leading-relaxed">
               診断「エグタイプ」から生まれた妖精たち。危険度ランク S → C 順。あなたはどの子？
@@ -352,7 +369,7 @@ export default function Home() {
           </div>
         </div>
 
-        {/* 図鑑グリッド: 16体を全員カード表示。これがサイトの中心 */}
+        {/* 図鑑グリッド: 32体を全員カード表示。これがサイトの中心 */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-5 mb-9">
           {ALL_CHARACTERS.map((c) => (
             <Link
@@ -652,7 +669,7 @@ export default function Home() {
             {/* 旧 // モノラベルのグリッド → 柔らかい粘土チップに再設計 */}
             <div className="grid grid-cols-2 gap-3 md:gap-4 pt-4">
               {[
-                { label: "キャラクター", value: "16体（全員公開中）", color: "var(--primary)" },
+                { label: "キャラクター", value: "32体（全員公開中）", color: "var(--primary)" },
                 { label: "あそびかた", value: "診断・ゲーム・スタンプ", color: "var(--pop-pink)" },
                 { label: "つくってる人", value: "ひとり + AI", color: "var(--pop-cyan)" },
                 { label: "うまれた国", value: "日本", color: "var(--pop-orange)" },

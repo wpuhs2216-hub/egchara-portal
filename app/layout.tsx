@@ -30,19 +30,19 @@ const dmSans = DM_Sans({
 
 export const metadata: Metadata = {
   metadataBase: new URL('https://egshugy.com'),
-  title: 'エグキャラ — 16体のエグかわ妖精たち。',
-  description: 'エグキャラ公式サイト。自虐 × 妖精語 × 匂わせポエムで生まれた16体のエグかわキャラクター。エグタイプ診断で自分のエグキャラを見つけよう。ぺかりんのちんちろ・LINEスタンプも。',
+  title: 'エグキャラ — 32体のエグかわ妖精たち。',
+  description: 'エグキャラ公式サイト。自虐 × 妖精語 × 匂わせポエムで生まれた32体のエグかわキャラクター。エグタイプ診断で自分のエグキャラを見つけよう。ぺかりんのちんちろ・LINEスタンプも。',
   // og:image / twitter:image は app/opengraph-image.tsx と app/twitter-image.tsx で自動生成
   openGraph: {
-    title: 'エグキャラ — 16体のエグかわ妖精たち。',
-    description: '自虐 × 妖精語 × 匂わせポエムで生まれた16体のエグかわキャラクター。',
+    title: 'エグキャラ — 32体のエグかわ妖精たち。',
+    description: '自虐 × 妖精語 × 匂わせポエムで生まれた32体のエグかわキャラクター。',
     type: 'website',
     locale: 'ja_JP',
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'エグキャラ — 16体のエグかわ妖精たち。',
-    description: '自虐 × 妖精語 × 匂わせポエムで生まれた16体のエグかわキャラクター。',
+    title: 'エグキャラ — 32体のエグかわ妖精たち。',
+    description: '自虐 × 妖精語 × 匂わせポエムで生まれた32体のエグかわキャラクター。',
   },
   generator: 'v0.app',
   // favicon / apple-touch-icon は app/icon.tsx と app/apple-icon.tsx で動的生成
