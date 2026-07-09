@@ -29,6 +29,8 @@ type ProductStatus = "live" | "soon" | "preview"
 type ExperimentCategory = "Diagnostic" | "Game" | "Tool"
 
 interface Character {
+  /** 2026-06 大改修で追加された新キャラ（図鑑で NEW バッジ表示） */
+  isNew?: boolean
   id: string
   name: string
   animal: string
@@ -79,22 +81,22 @@ const ALL_CHARACTERS: Character[] = [
   { id: "BRCK", name: "しゃっちー", animal: "シャチ", theme: "過労の歯車", catchphrase: "休んだら迷惑かかるから", dangerRank: "C" },
   { id: "BRWK", name: "すりよりす", animal: "リス", theme: "空気の奴隷", catchphrase: "みんながそう言ってるし", dangerRank: "C" },
   // --- v2 追加の新16キャラ（2026-06 大改修。正解データ: egtype/src/data/new-characters.ts） ---
-  { id: "usoron", name: "でまろう", animal: "オオカミ", theme: "ゼロから作る作話", catchphrase: "いやそれ、本当はこうだったんだって", dangerRank: "A" },
-  { id: "mayakashi", name: "とぼけろん", animal: "カメレオン", theme: "論点スライドの達人", catchphrase: "あー、それはそれとして、さ", dangerRank: "A" },
-  { id: "seigin", name: "せいぎん", animal: "ペンギン", theme: "氷上の正しさ王様", catchphrase: "それ、間違ってると思うけど", dangerRank: "A" },
-  { id: "sokubaku", name: "おもうま", animal: "ウマ", theme: "手綱を離せない愛", catchphrase: "好きだから、ちゃんと知っておきたいだけ", dangerRank: "A" },
-  { id: "koizaru", name: "さかりざる", animal: "サル", theme: "刺激を渡り歩く", catchphrase: "ちょっと刺激が足りないだけ", dangerRank: "A" },
-  { id: "unubon", name: "なるしし", animal: "ライオン", theme: "鏡に恋する王", catchphrase: "うん、今日のわたし、わるくない。", dangerRank: "B" },
-  { id: "oregatari", name: "かたりんこ", animal: "インコ", theme: "会話の横取り名人", catchphrase: "あー、それで言うと俺の場合さ——", dangerRank: "B" },
-  { id: "jishoun", name: "わけあるま", animal: "アルマジロ", theme: "事後の言い訳職人", catchphrase: "やったのは僕だよ、ただちょっと訳があってさ", dangerRank: "B" },
-  { id: "raberu", name: "だからす", animal: "カラス", theme: "事前の予防線", catchphrase: "言っとくけど俺、そういうの無理な人だから", dangerRank: "B" },
-  { id: "gossip", name: "こそづる", animal: "ツル", theme: "陰でこそこそ", catchphrase: "ここだけの話なんだけどさ", dangerRank: "B" },
-  { id: "kawaiso", name: "かわいそ", animal: "カワウソ", theme: "悲劇の主役", catchphrase: "でも自分なんて、もっと大変でさ", dangerRank: "B" },
-  { id: "netami", name: "うらやぎ", animal: "ヤギ", theme: "隣の芝は青い", catchphrase: "いいなあ、自分なんて何もないのに", dangerRank: "B" },
-  { id: "shinpai", name: "ふあんこう", animal: "アンコウ", theme: "最悪の未来を上映", catchphrase: "もし、こうなったらどうしよう…", dangerRank: "B" },
-  { id: "dokechi", name: "けちぞう", animal: "ゾウ", theme: "一円も出さない蔵", catchphrase: "いや、それもったいないでしょ", dangerRank: "B" },
-  { id: "mashidori", name: "まだましか", animal: "アシカ", theme: "比べて安心", catchphrase: "まあ、それに比べたら自分はまだマシな方かな。", dangerRank: "C" },
-  { id: "heibon", name: "とくなし", animal: "カバ", theme: "特徴ゼロの巨体", catchphrase: "まあ、自分は特にないかな", dangerRank: "C" },
+  { id: "usoron", name: "でまろう", animal: "オオカミ", theme: "ゼロから作る作話", catchphrase: "いやそれ、本当はこうだったんだって", dangerRank: "A", isNew: true },
+  { id: "mayakashi", name: "とぼけろん", animal: "カメレオン", theme: "論点スライドの達人", catchphrase: "あー、それはそれとして、さ", dangerRank: "A", isNew: true },
+  { id: "seigin", name: "せいぎん", animal: "ペンギン", theme: "氷上の正しさ王様", catchphrase: "それ、間違ってると思うけど", dangerRank: "A", isNew: true },
+  { id: "sokubaku", name: "おもうま", animal: "ウマ", theme: "手綱を離せない愛", catchphrase: "好きだから、ちゃんと知っておきたいだけ", dangerRank: "A", isNew: true },
+  { id: "koizaru", name: "さかりざる", animal: "サル", theme: "刺激を渡り歩く", catchphrase: "ちょっと刺激が足りないだけ", dangerRank: "A", isNew: true },
+  { id: "unubon", name: "なるしし", animal: "ライオン", theme: "鏡に恋する王", catchphrase: "うん、今日のわたし、わるくない。", dangerRank: "B", isNew: true },
+  { id: "oregatari", name: "かたりんこ", animal: "インコ", theme: "会話の横取り名人", catchphrase: "あー、それで言うと俺の場合さ——", dangerRank: "B", isNew: true },
+  { id: "jishoun", name: "わけあるま", animal: "アルマジロ", theme: "事後の言い訳職人", catchphrase: "やったのは僕だよ、ただちょっと訳があってさ", dangerRank: "B", isNew: true },
+  { id: "raberu", name: "だからす", animal: "カラス", theme: "事前の予防線", catchphrase: "言っとくけど俺、そういうの無理な人だから", dangerRank: "B", isNew: true },
+  { id: "gossip", name: "こそづる", animal: "ツル", theme: "陰でこそこそ", catchphrase: "ここだけの話なんだけどさ", dangerRank: "B", isNew: true },
+  { id: "kawaiso", name: "かわいそ", animal: "カワウソ", theme: "悲劇の主役", catchphrase: "でも自分なんて、もっと大変でさ", dangerRank: "B", isNew: true },
+  { id: "netami", name: "うらやぎ", animal: "ヤギ", theme: "隣の芝は青い", catchphrase: "いいなあ、自分なんて何もないのに", dangerRank: "B", isNew: true },
+  { id: "shinpai", name: "ふあんこう", animal: "アンコウ", theme: "最悪の未来を上映", catchphrase: "もし、こうなったらどうしよう…", dangerRank: "B", isNew: true },
+  { id: "dokechi", name: "けちぞう", animal: "ゾウ", theme: "一円も出さない蔵", catchphrase: "いや、それもったいないでしょ", dangerRank: "B", isNew: true },
+  { id: "mashidori", name: "まだましか", animal: "アシカ", theme: "比べて安心", catchphrase: "まあ、それに比べたら自分はまだマシな方かな。", dangerRank: "C", isNew: true },
+  { id: "heibon", name: "とくなし", animal: "カバ", theme: "特徴ゼロの巨体", catchphrase: "まあ、自分は特にないかな", dangerRank: "C", isNew: true },
 ]
 
 // PRODUCTS: 夜職事業の関連プロダクト（SHOW_PRODUCTS=false の間は非表示）
@@ -384,8 +386,8 @@ export default function Home() {
               >
                 {c.dangerRank}
               </span>
-              {/* 2026-06 大改修で追加された新キャラは NEW バッジ（id が小文字=キャラID形式） */}
-              {/^[a-z]/.test(c.id) && (
+              {/* 新キャラは NEW バッジ（isNew フィールドで明示） */}
+              {c.isNew && (
                 <span className="absolute top-3 left-3 z-10 rounded-full bg-primary text-primary-foreground font-display font-black text-[11px] px-2.5 py-1 clay tracking-wider">
                   NEW
                 </span>

@@ -11,7 +11,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
 
 const baseIdx = process.argv.indexOf('--base')
-const BASE = baseIdx > -1 ? process.argv[baseIdx + 1].replace(/\/$/, '') : 'https://egshugy.com'
+const baseArg = baseIdx > -1 ? process.argv[baseIdx + 1] : null
+if (baseIdx > -1 && !baseArg) { console.error('--base にはURLを指定してください'); process.exit(2) }
+const BASE = (baseArg ?? 'https://egshugy.com').replace(/\/$/, '')
 
 // 1) featured-apps.tsx から内部リンクを抽出（comingSoon=false のもののみ）
 const featured = fs.readFileSync(path.join(ROOT, 'components/featured-apps.tsx'), 'utf8')
@@ -24,10 +26,20 @@ const page = fs.readFileSync(path.join(ROOT, 'app/page.tsx'), 'utf8')
 const charIds = [...page.matchAll(/\{ id: "([A-Za-z]+)", name: "/g)].map((m) => m[1])
 const charImages = charIds.map((id) => `/egtype/characters/${id}.webp`)
 
-// 3) 主要外部リンク（tsx から https を素朴に抽出し、CDN/フォント等のノイズを除外）
-const EXCLUDE = /w3\.org|fonts\.|line-scdn|embed\.js|placeholder/
+// 3) 主要外部リンク（components/ と app/ の全 tsx から抽出し、CDN/フォント等のノイズを除外）
+const EXCLUDE = /w3\.org|fonts\.|line-scdn|embed\.js|placeholder|schema\.org/
+function collectTsx(dir) {
+  let out = ''
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, e.name)
+    if (e.isDirectory()) out += collectTsx(full)
+    else if (e.name.endsWith('.tsx') || e.name.endsWith('.ts')) out += fs.readFileSync(full, 'utf8')
+  }
+  return out
+}
+const allSrc = collectTsx(path.join(ROOT, 'components')) + collectTsx(path.join(ROOT, 'app'))
 const externals = [...new Set(
-  [...(page + featured).matchAll(/https:\/\/[a-zA-Z0-9./_-]+/g)].map((m) => m[0])
+  [...allSrc.matchAll(/https:\/\/[a-zA-Z0-9./_-]+/g)].map((m) => m[0])
 )].filter((u) => !EXCLUDE.test(u))
 
 async function check(url) {
