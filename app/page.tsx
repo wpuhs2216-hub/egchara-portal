@@ -365,7 +365,7 @@ export default function Home() {
             </p>
           </div>
           <div className="text-[14px] text-muted-foreground font-display font-bold bg-card border-[2px] border-border rounded-full px-4 py-2 clay">
-            <strong className="text-primary font-black">16</strong> / 16 そろってる
+            <strong className="text-primary font-black">{ALL_CHARACTERS.length}</strong> / {ALL_CHARACTERS.length} そろってる
           </div>
         </div>
 
@@ -384,6 +384,12 @@ export default function Home() {
               >
                 {c.dangerRank}
               </span>
+              {/* 2026-06 大改修で追加された新キャラは NEW バッジ（id が小文字=キャラID形式） */}
+              {/^[a-z]/.test(c.id) && (
+                <span className="absolute top-3 left-3 z-10 rounded-full bg-primary text-primary-foreground font-display font-black text-[11px] px-2.5 py-1 clay tracking-wider">
+                  NEW
+                </span>
+              )}
               <div className="aspect-square rounded-[1.4rem] overflow-hidden bg-secondary border-[2.5px] border-border mb-3 group-hover:border-primary/40 transition-colors">
                 <img
                   src={`/egtype/characters/${c.id}.webp`}

@@ -8,7 +8,8 @@
     "dev": "next dev",
     "lint": "eslint .",
     "purge-cache": "node scripts/purge-cache.js",
-    "start": "next start"
+    "start": "next start",
+    "check-links": "node scripts/check-links.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
