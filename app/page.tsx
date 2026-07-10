@@ -423,7 +423,7 @@ export default function Home() {
                 エグタイプ診断で自分の1体を見つける
               </h3>
               <p className="text-[15px] text-white/85 leading-relaxed max-w-xl">
-                4 軸性格診断で 16 パターンに判定。自虐 × 妖精語 × 匂わせポエムの 3 層構造。
+                悪癖×行動スタイルの状況診断で 32 キャラに判定。自虐 × 妖精語 × 匂わせポエムの 3 層構造。
               </p>
             </div>
             <span className="flex-shrink-0 inline-flex items-center gap-2 px-7 py-3.5 bg-white text-primary font-display font-black text-[16px] rounded-full">
@@ -663,7 +663,7 @@ export default function Home() {
           <div className="space-y-5 text-[16px] leading-[1.9] text-muted-foreground">
             <p>
               <strong className="text-foreground font-bold">エグキャラ</strong> は、
-              性格診断「エグタイプ」から生まれた 16 体のキャラクターたちです。
+              性格診断「エグタイプ」から生まれた 32 体のキャラクターたちです。
             </p>
             <p>
               <span className="text-primary font-bold">自虐 × 妖精語 × 匂わせポエム</span>の 3 層構造で、
@@ -786,7 +786,7 @@ export default function Home() {
             <p className="text-[13px] text-muted-foreground leading-relaxed max-w-xs">
               自虐 × 妖精語 × 匂わせポエムで生まれた、
               <br />
-              16 体のエグかわキャラクター。
+              32 体のエグかわキャラクター。
             </p>
           </div>
           <div>
