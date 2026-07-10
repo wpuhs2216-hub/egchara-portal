@@ -1,0 +1,24 @@
+# 本番 (https://egshugy.com) のリンク死活を定期チェックする。
+# check-links.mjs はリポのソース(tsx)から内部リンク・画像・外部リンクを収集して
+# 実リクエストで検証し、1件でも落ちていれば exit 1 → この workflow が赤くなる。
+# schedule はデフォルトブランチ(main)にマージされてから有効になる。
+name: link-check
+
+on:
+  schedule:
+    # 毎日 21:30 UTC = 6:30 JST（朝のブリーフ前に結果が出ている）
+    - cron: '30 21 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  check-links:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # 依存なしの素の node スクリプトなので npm ci は不要
+      - name: 本番リンク死活チェック
+        run: node scripts/check-links.mjs
