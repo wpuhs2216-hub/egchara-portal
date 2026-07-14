@@ -323,7 +323,7 @@ export default function Home() {
       <section className="max-w-6xl mx-auto px-4 md:px-6">
         {(() => {
           const stats = [
-            { label: "キャラクター", value: "16", delta: "全員エグかわ", color: "var(--primary)" },
+            { label: "キャラクター", value: "32", delta: "全員エグかわ", color: "var(--primary)" },
             ...(SHOW_PLAYGROUND ? [{ label: "あそべる実験", value: "7", delta: "PLAYGROUND", color: "var(--pop-cyan)" }] : []),
             { label: "スピンオフ", value: "1", delta: "ぺかりんちんちろ", color: "var(--pop-pink)" },
             { label: "稼働日数", value: `${uptimeDays}日`, delta: "2026-02-20 から", color: "var(--pop-orange)" },
@@ -376,7 +376,7 @@ export default function Home() {
           {ALL_CHARACTERS.map((c) => (
             <Link
               key={c.id}
-              href="/egtype/"
+              href={`/egtype/types/${c.id}/`}
               className="group relative bg-card border-[3px] border-border rounded-[1.8rem] p-4 clay clay-hover"
             >
               {/* 危険度ランクのぷっくりバッジ */}

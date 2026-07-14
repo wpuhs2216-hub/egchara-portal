@@ -21,10 +21,12 @@ const internal = [...featured.matchAll(/href: "(\/[a-z0-9-]+\/)", comingSoon: (t
   .filter((m) => m[2] === 'false')
   .map((m) => m[1])
 
-// 2) page.tsx の ALL_CHARACTERS から32キャラ画像URLを生成
+// 2) page.tsx の ALL_CHARACTERS から32キャラ画像URL + 図鑑カードのディープリンク先(types)を生成
 const page = fs.readFileSync(path.join(ROOT, 'app/page.tsx'), 'utf8')
 const charIds = [...page.matchAll(/\{ id: "([A-Za-z]+)", name: "/g)].map((m) => m[1])
 const charImages = charIds.map((id) => `/egtype/characters/${id}.webp`)
+// 図鑑カードは /egtype/types/<id>/ へディープリンクする（Day23）。リンク切れを死活監視する。
+const charPages = charIds.map((id) => `/egtype/types/${id}/`)
 
 // 3) 主要外部リンク（components/ と app/ の全 tsx から抽出し、CDN/フォント等のノイズを除外）
 const EXCLUDE = /w3\.org|fonts\.|line-scdn|embed\.js|placeholder|schema\.org/
@@ -59,10 +61,11 @@ async function check(url) {
 const targets = [
   ...internal.map((p) => BASE + p),
   ...charImages.map((p) => BASE + p),
+  ...charPages.map((p) => BASE + p),
   ...externals,
 ]
 
-console.log(`[check-links] base=${BASE} 内部${internal.length} + キャラ画像${charImages.length} + 外部${externals.length} = ${targets.length}件`)
+console.log(`[check-links] base=${BASE} 内部${internal.length} + キャラ画像${charImages.length} + キャラ頁${charPages.length} + 外部${externals.length} = ${targets.length}件`)
 const results = await Promise.all(targets.map(check))
 const bad = results.filter((r) => !r.ok)
 
