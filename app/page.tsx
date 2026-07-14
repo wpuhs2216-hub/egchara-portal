@@ -323,7 +323,7 @@ export default function Home() {
       <section className="max-w-6xl mx-auto px-4 md:px-6">
         {(() => {
           const stats = [
-            { label: "キャラクター", value: "32", delta: "全員エグかわ", color: "var(--primary)" },
+            { label: "キャラクター", value: String(ALL_CHARACTERS.length), delta: "全員エグかわ", color: "var(--primary)" },
             ...(SHOW_PLAYGROUND ? [{ label: "あそべる実験", value: "7", delta: "PLAYGROUND", color: "var(--pop-cyan)" }] : []),
             { label: "スピンオフ", value: "1", delta: "ぺかりんちんちろ", color: "var(--pop-pink)" },
             { label: "稼働日数", value: `${uptimeDays}日`, delta: "2026-02-20 から", color: "var(--pop-orange)" },
@@ -677,7 +677,7 @@ export default function Home() {
             {/* 旧 // モノラベルのグリッド → 柔らかい粘土チップに再設計 */}
             <div className="grid grid-cols-2 gap-3 md:gap-4 pt-4">
               {[
-                { label: "キャラクター", value: "32体（全員公開中）", color: "var(--primary)" },
+                { label: "キャラクター", value: `${ALL_CHARACTERS.length}体（全員公開中）`, color: "var(--primary)" },
                 { label: "あそびかた", value: "診断・ゲーム・スタンプ", color: "var(--pop-pink)" },
                 { label: "つくってる人", value: "ひとり + AI", color: "var(--pop-cyan)" },
                 { label: "うまれた国", value: "日本", color: "var(--pop-orange)" },
