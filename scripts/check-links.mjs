@@ -2,7 +2,9 @@
 // 使い方:
 //   node scripts/check-links.mjs             # 本番 (https://egshugy.com) に対して確認
 //   node scripts/check-links.mjs --base http://192.168.0.77   # オリジン直叩き
-// 終了コード: 全OK=0 / 失敗あり=1（cron・手動どちらでも使える）
+//   node scripts/check-links.mjs --strict    # egtype依存の型ページ(soft)404も致命扱い
+// 終了コード: portal自前リンク失敗=1 / soft(egtype型ページ)失敗は既定で警告のみ(0)・--strictで1
+//   (egtype と portal はセットでデプロイ。egtype 未デプロイ中の新16体型ページ404は想定内)
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -58,24 +60,39 @@ async function check(url) {
   }
 }
 
+// カテゴリ分離: portal自前で常時live であるべきもの(hard)と、egtype の別デプロイに
+// 依存する型ページ・ディープリンク(soft)を分ける。type ページは egtype 本番デプロイ後に
+// 有効化される(portal と egtype はセットでデプロイする運用)。egtype 未デプロイ中に
+// 新16体の /egtype/types/<id>/ が404になるのは既知・想定内で、portal の cron 定点観測を
+// 常時 red にしない。--strict 指定時のみ soft 失敗も致命(exit 1)にする。
+const STRICT = process.argv.includes('--strict')
 const targets = [
-  ...internal.map((p) => BASE + p),
-  ...charImages.map((p) => BASE + p),
-  ...charPages.map((p) => BASE + p),
-  ...externals,
+  ...internal.map((p) => ({ url: BASE + p, cat: '内部', soft: false })),
+  ...charImages.map((p) => ({ url: BASE + p, cat: 'キャラ画像', soft: false })),
+  ...charPages.map((p) => ({ url: BASE + p, cat: 'キャラ型頁', soft: true })),
+  ...externals.map((u) => ({ url: u, cat: '外部', soft: false })),
 ]
 
-console.log(`[check-links] base=${BASE} 内部${internal.length} + キャラ画像${charImages.length} + キャラ頁${charPages.length} + 外部${externals.length} = ${targets.length}件`)
-const results = await Promise.all(targets.map(check))
-const bad = results.filter((r) => !r.ok)
+console.log(`[check-links] base=${BASE} 内部${internal.length} + キャラ画像${charImages.length} + キャラ型頁${charPages.length}(soft) + 外部${externals.length} = ${targets.length}件${STRICT ? ' [strict]' : ''}`)
+const results = await Promise.all(targets.map(async (t) => ({ ...t, ...(await check(t.url)) })))
+const hardBad = results.filter((r) => !r.ok && !r.soft)
+const softBad = results.filter((r) => !r.ok && r.soft)
 
-for (const r of results) {
-  if (!r.ok) console.log(`  ✗ ${r.status || r.err}  ${r.url}`)
+for (const r of hardBad) console.log(`  ✗ ${r.status || r.err}  [${r.cat}] ${r.url}`)
+for (const r of softBad) console.log(`  ⚠ ${r.status || r.err}  [${r.cat}] ${r.url}`)
+
+if (softBad.length > 0) {
+  console.log(`[check-links] ⚠ egtype依存(soft) ${softBad.length}/${charPages.length} 件が未到達 — egtype 本番デプロイ待ちなら想定内(portal と egtype はセットでデプロイ)。デプロイ後は --strict で厳格確認。`)
 }
-if (bad.length === 0) {
+
+const fatal = hardBad.length > 0 || (STRICT && softBad.length > 0)
+if (!fatal && hardBad.length === 0 && softBad.length === 0) {
   console.log(`[check-links] ✓ 全${results.length}件 OK`)
   process.exit(0)
+} else if (!fatal) {
+  console.log(`[check-links] ✓ portal自前 ${results.length - softBad.length}/${results.length - softBad.length} 件 OK（soft ${softBad.length}件は警告のみ）`)
+  process.exit(0)
 } else {
-  console.log(`[check-links] ✗ ${bad.length}/${results.length} 件が失敗`)
+  console.log(`[check-links] ✗ 致命 ${hardBad.length}件${STRICT ? ` + soft ${softBad.length}件` : ''} / 全${results.length}件`)
   process.exit(1)
 }
