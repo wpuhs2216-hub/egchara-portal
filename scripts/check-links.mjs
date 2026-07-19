@@ -19,12 +19,20 @@ const BASE = (baseArg ?? 'https://egshugy.com').replace(/\/$/, '')
 
 // 1) featured-apps.tsx から内部リンクを抽出（comingSoon=false のもののみ）
 const featured = fs.readFileSync(path.join(ROOT, 'components/featured-apps.tsx'), 'utf8')
-const internal = [...featured.matchAll(/href: "(\/[a-z0-9-]+\/)", comingSoon: (true|false)/g)]
+const featuredInternal = [...featured.matchAll(/href: "(\/[a-z0-9-]+\/)", comingSoon: (true|false)/g)]
   .filter((m) => m[2] === 'false')
   .map((m) => m[1])
 
 // 2) page.tsx の ALL_CHARACTERS から32キャラ画像URL + 図鑑カードのディープリンク先(types)を生成
 const page = fs.readFileSync(path.join(ROOT, 'app/page.tsx'), 'utf8')
+
+// 2.5) page.tsx の EXPERIMENTS(あそぶ) からも稼働中(active|beta)ゲームの内部リンクを抽出。
+//   featured-apps とは別配列・別 shape(status ベース)で持つため、ここを見ないと playground の
+//   リンク切れを取りこぼす（実際 6ボールパズルが /puzzle/(404) と /ramune-puzzle/(200) で
+//   featured-apps と食い違っていた）。soon(href なし)は対象外。featured-apps と重複しても Set で統合。
+const experimentInternal = [...page.matchAll(/status: "(?:active|beta)", href: "(\/[a-z0-9-]+\/)"/g)]
+  .map((m) => m[1])
+const internal = [...new Set([...featuredInternal, ...experimentInternal])]
 const charIds = [...page.matchAll(/\{ id: "([A-Za-z]+)", name: "/g)].map((m) => m[1])
 const charImages = charIds.map((id) => `/egtype/characters/${id}.webp`)
 // 図鑑カードは /egtype/types/<id>/ へディープリンクする（Day23）。リンク切れを死活監視する。

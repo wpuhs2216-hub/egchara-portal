@@ -166,7 +166,7 @@ const EXPERIMENTS: Experiment[] = [
   { id: "kingscup", ja: "キングスカップ", en: "KINGS CUP", category: "Game", status: "active", href: "/kingscup/" },
   { id: "compat", ja: "相性診断", en: "COMPATIBILITY", category: "Diagnostic", status: "active", href: "/compatibility/" },
   { id: "nickname", ja: "あだ名メーカー", en: "NICKNAME GEN", category: "Tool", status: "active", href: "/nickname-gen/" },
-  { id: "puzzle", ja: "6 ボールパズル", en: "6-BALL PUZZLE", category: "Game", status: "beta", href: "/puzzle/" },
+  { id: "puzzle", ja: "6 ボールパズル", en: "6-BALL PUZZLE", category: "Game", status: "beta", href: "/ramune-puzzle/" },
   { id: "egramen", ja: "えぐラーメン食堂", en: "EGRAMEN", category: "Game", status: "beta", href: "/egramen/" },
   { id: "yamanote", ja: "山手線ゲーム", en: "YAMANOTE", category: "Game", status: "soon" },
 ]
