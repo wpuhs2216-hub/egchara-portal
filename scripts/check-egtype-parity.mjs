@@ -102,6 +102,26 @@ for (const id of Object.keys(canon)) {
 }
 
 const total = portal.length
+
+// --- 総数コピーの drift ガード ---
+// ブランドタグライン「N体のエグかわ…」の N はキャラ総数を指す。メタ(layout.tsx)と
+// OG(opengraph-image.tsx)は別モジュールで ALL_CHARACTERS を import できず数字をハード
+// コードしているため、キャラ増減時にタグラインだけ stale 化しうる(page.tsx の UI は
+// {ALL_CHARACTERS.length} 駆動化済み=Day49)。"1体" 等の別用途と混同しないよう
+// 「N体のエグかわ」限定で総数一致を検査する。
+const taglineFiles = ['app/layout.tsx', 'app/opengraph-image.tsx', 'app/page.tsx']
+for (const rel of taglineFiles) {
+  const src = fs.readFileSync(path.join(PORTAL_DIR, rel), 'utf8')
+  const tagRe = /(\d+)\s*体のエグかわ/g
+  let tm
+  while ((tm = tagRe.exec(src))) {
+    if (Number(tm[1]) !== total) {
+      console.log(`✗ 総数コピー不一致 ${rel}: "${tm[1]}体のエグかわ…" だが実キャラ数=${total}`)
+      issues++
+    }
+  }
+}
+
 if (issues === 0) {
   console.log(`[parity] ✓ portal ⇄ egtype 整合 (${total}体 name/animal/theme/catchphrase/dangerRank + 画像 全一致)`)
   process.exit(0)

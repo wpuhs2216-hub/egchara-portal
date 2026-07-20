@@ -293,7 +293,7 @@ export default function Home() {
               href="#characters"
               className="inline-flex items-center gap-2 px-8 py-4 bg-card border-[3px] border-border text-foreground font-display font-extrabold text-[16px] rounded-full clay-btn"
             >
-              32体を見る
+              {ALL_CHARACTERS.length}体を見る
             </a>
           </div>
         </div>
@@ -360,7 +360,7 @@ export default function Home() {
               <SectionPill color="var(--pop-pink)">キャラクター</SectionPill>
             </div>
             <h2 className="font-display font-black text-[clamp(30px,5.5vw,54px)] tracking-[-0.02em] leading-tight">
-              エグキャラ<span className="text-primary">図鑑</span>。全32体。
+              エグキャラ<span className="text-primary">図鑑</span>。全{ALL_CHARACTERS.length}体。
             </h2>
             <p className="mt-3 max-w-xl text-[15px] text-muted-foreground leading-relaxed">
               診断「エグタイプ」から生まれた妖精たち。危険度ランク S → C 順。あなたはどの子？
@@ -663,7 +663,7 @@ export default function Home() {
           <div className="space-y-5 text-[16px] leading-[1.9] text-muted-foreground">
             <p>
               <strong className="text-foreground font-bold">エグキャラ</strong> は、
-              性格診断「エグタイプ」から生まれた 32 体のキャラクターたちです。
+              性格診断「エグタイプ」から生まれた {ALL_CHARACTERS.length} 体のキャラクターたちです。
             </p>
             <p>
               <span className="text-primary font-bold">自虐 × 妖精語 × 匂わせポエム</span>の 3 層構造で、
@@ -786,7 +786,7 @@ export default function Home() {
             <p className="text-[13px] text-muted-foreground leading-relaxed max-w-xs">
               自虐 × 妖精語 × 匂わせポエムで生まれた、
               <br />
-              32 体のエグかわキャラクター。
+              {ALL_CHARACTERS.length} 体のエグかわキャラクター。
             </p>
           </div>
           <div>
