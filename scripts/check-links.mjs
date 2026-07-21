@@ -50,8 +50,12 @@ function collectTsx(dir) {
   return out
 }
 const allSrc = collectTsx(path.join(ROOT, 'components')) + collectTsx(path.join(ROOT, 'app'))
+// URL 文字クラスに @ を含める。含めないと SNS の @handle リンク
+// (tiktok.com/@diva_egshugy, youtube.com/@diva_shu 等)が @ の手前で切れて
+// バレのトップ URL(tiktok.com/, youtube.com/)として検査され、実アカウント URL の
+// 死活を見ていなかった(常時200のトップだけ叩いて合格していた)。@ を含めて実URLを拾う。
 const externals = [...new Set(
-  [...allSrc.matchAll(/https:\/\/[a-zA-Z0-9./_-]+/g)].map((m) => m[0])
+  [...allSrc.matchAll(/https:\/\/[a-zA-Z0-9./_@-]+/g)].map((m) => m[0])
 )].filter((u) => !EXCLUDE.test(u))
 
 async function check(url) {
