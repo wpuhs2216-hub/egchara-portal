@@ -32,7 +32,28 @@ const page = fs.readFileSync(path.join(ROOT, 'app/page.tsx'), 'utf8')
 //   featured-apps と食い違っていた）。soon(href なし)は対象外。featured-apps と重複しても Set で統合。
 const experimentInternal = [...page.matchAll(/status: "(?:active|beta)", href: "(\/[a-z0-9-]+\/)"/g)]
   .map((m) => m[1])
-const internal = [...new Set([...featuredInternal, ...experimentInternal])]
+
+// 2.6) ライブページ(app/**/*.tsx)の JSX 静的内部リンク(href="/...")も抽出。
+//   ヘッダ/フッタ/ナビの Link href="/noxa/"・href="/stamps/" 等は featured-apps/EXPERIMENTS の
+//   オブジェクト配列 shape に載らないため、これを見ないと portal 自前サブページ導線のリンク切れを
+//   取りこぼす(実際 /noxa/・/stamps/ が無監視だった＝Day45 の EXPERIMENTS 取りこぼしと同クラス)。
+//   アンカー(#...)・動的(テンプレートリテラル ${...})は静的 href="/..." に一致しないため自然に除外。
+//   キャラ型頁の /egtype/types/<id>/ は charPages(soft)が別途担当。components/ は未レンダーの
+//   デッドコンポーネントを含むため対象にせず、実ルートである app/ のみを見る。
+function collectAppInternal(dir) {
+  let out = []
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, e.name)
+    if (e.isDirectory()) out = out.concat(collectAppInternal(full))
+    else if (e.name.endsWith('.tsx')) {
+      const src = fs.readFileSync(full, 'utf8')
+      out = out.concat([...src.matchAll(/href="(\/[a-z0-9/-]*)"/g)].map((m) => m[1]))
+    }
+  }
+  return out
+}
+const pageNavInternal = collectAppInternal(path.join(ROOT, 'app'))
+const internal = [...new Set([...featuredInternal, ...experimentInternal, ...pageNavInternal])]
 const charIds = [...page.matchAll(/\{ id: "([A-Za-z]+)", name: "/g)].map((m) => m[1])
 const charImages = charIds.map((id) => `/egtype/characters/${id}.webp`)
 // 図鑑カードは /egtype/types/<id>/ へディープリンクする（Day23）。リンク切れを死活監視する。
