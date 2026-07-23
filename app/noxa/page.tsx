@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react"
 import Link from "next/link"
+import { daysSince } from "@/lib/uptime"
 
 /**
  * Noxa — 夜職 DX プラットフォームの構想（CONCEPT, NOT LAUNCHED YET）
@@ -130,13 +131,11 @@ const PILLARS = [
   },
 ]
 
+// 日数差の算出は lib/uptime の daysSince に集約（トップページと共有・負値クランプ込み）。
 function useDaysSinceLaunch(): number {
   const [days, setDays] = useState(0)
   useEffect(() => {
-    const origin = new Date("2026-05-13T00:00:00+09:00")
-    const now = new Date()
-    const diff = Math.max(0, Math.floor((now.getTime() - origin.getTime()) / (1000 * 60 * 60 * 24)))
-    setDays(diff)
+    setDays(daysSince("2026-05-13T00:00:00+09:00"))
   }, [])
   return days
 }

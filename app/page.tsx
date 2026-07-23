@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react"
 import Link from "next/link"
+import { daysSince } from "@/lib/uptime"
 
 /**
  * エグキャラ — egshugy.com root portal
@@ -172,13 +173,11 @@ const EXPERIMENTS: Experiment[] = [
 ]
 
 // 稼働日数カウンタ（リリース起点を 2026-02-20 = egtype 初版日とする）
+// 日数差の算出は lib/uptime の daysSince に集約（負値クランプを noxa と共有）。
 function useUptimeDays(): number {
   const [days, setDays] = useState(0)
   useEffect(() => {
-    const origin = new Date("2026-02-20T00:00:00+09:00")
-    const now = new Date()
-    const diff = Math.floor((now.getTime() - origin.getTime()) / (1000 * 60 * 60 * 24))
-    setDays(diff)
+    setDays(daysSince("2026-02-20T00:00:00+09:00"))
   }, [])
   return days
 }
