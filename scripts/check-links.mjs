@@ -17,11 +17,38 @@ const baseArg = baseIdx > -1 ? process.argv[baseIdx + 1] : null
 if (baseIdx > -1 && !baseArg) { console.error('--base にはURLを指定してください'); process.exit(2) }
 const BASE = (baseArg ?? 'https://egshugy.com').replace(/\/$/, '')
 
-// 1) featured-apps.tsx から内部リンクを抽出（comingSoon=false のもののみ）
+// あるコンポーネントが app/ の実ルートから import され実際にレンダーされているか。
+// import されていない = デッドコンポーネント(未レンダー)で、その内部リンクは live サイトの
+// どこからも辿れない phantom。
+function isImportedByApp(basename) {
+  const stack = [path.join(ROOT, 'app')]
+  const re = new RegExp(`from\\s+["'][^"']*${basename}["']`)
+  while (stack.length) {
+    const dir = stack.pop()
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, e.name)
+      if (e.isDirectory()) stack.push(full)
+      else if (e.name.endsWith('.tsx') && re.test(fs.readFileSync(full, 'utf8'))) return true
+    }
+  }
+  return false
+}
+
+// 1) featured-apps.tsx の内部リンク抽出は「featured-apps が実際に app/ から import されて
+//   いる時だけ」行う。Day58 で判明したとおり featured-apps は現在どのページからも import
+//   されていないデッドコンポーネントで、その配列には live カタログ(EXPERIMENTS / app JSX)に
+//   存在しない phantom リンク(/ng-word/・/party/・/team-maker/ 等)が含まれる。常時抽出すると
+//   ①live から辿れないアプリの 404 で check-links が false-red になり ②「デッド components/ は
+//   監視しない」という下の collectAppInternal の方針(Day58)と自己矛盾する。import された
+//   (＝カタログとして復活した)時だけ拾い、それ以外は live 実リンク(experimentInternal +
+//   pageNavInternal)に委ねる(Day64)。
+const featuredLive = isImportedByApp('featured-apps')
 const featured = fs.readFileSync(path.join(ROOT, 'components/featured-apps.tsx'), 'utf8')
-const featuredInternal = [...featured.matchAll(/href: "(\/[a-z0-9-]+\/)", comingSoon: (true|false)/g)]
-  .filter((m) => m[2] === 'false')
-  .map((m) => m[1])
+const featuredInternal = featuredLive
+  ? [...featured.matchAll(/href: "(\/[a-z0-9-]+\/)", comingSoon: (true|false)/g)]
+      .filter((m) => m[2] === 'false')
+      .map((m) => m[1])
+  : []
 
 // 2) page.tsx の ALL_CHARACTERS から32キャラ画像URL + 図鑑カードのディープリンク先(types)を生成
 const page = fs.readFileSync(path.join(ROOT, 'app/page.tsx'), 'utf8')
@@ -106,7 +133,7 @@ const targets = [
   ...externals.map((u) => ({ url: u, cat: '外部', soft: false })),
 ]
 
-console.log(`[check-links] base=${BASE} 内部${internal.length} + キャラ画像${charImages.length} + キャラ型頁${charPages.length}(soft) + 外部${externals.length} = ${targets.length}件${STRICT ? ' [strict]' : ''}`)
+console.log(`[check-links] base=${BASE} 内部${internal.length}(featured-apps=${featuredLive ? 'live' : 'dead:除外'}) + キャラ画像${charImages.length} + キャラ型頁${charPages.length}(soft) + 外部${externals.length} = ${targets.length}件${STRICT ? ' [strict]' : ''}`)
 const results = await Promise.all(targets.map(async (t) => ({ ...t, ...(await check(t.url)) })))
 const hardBad = results.filter((r) => !r.ok && !r.soft)
 const softBad = results.filter((r) => !r.ok && r.soft)
