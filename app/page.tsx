@@ -422,7 +422,7 @@ export default function Home() {
                 エグタイプ診断で自分の1体を見つける
               </h3>
               <p className="text-[15px] text-white/85 leading-relaxed max-w-xl">
-                悪癖×行動スタイルの状況診断で 32 キャラに判定。自虐 × 妖精語 × 匂わせポエムの 3 層構造。
+                悪癖×行動スタイルの状況診断で {ALL_CHARACTERS.length} キャラに判定。自虐 × 妖精語 × 匂わせポエムの 3 層構造。
               </p>
             </div>
             <span className="flex-shrink-0 inline-flex items-center gap-2 px-7 py-3.5 bg-white text-primary font-display font-black text-[16px] rounded-full">

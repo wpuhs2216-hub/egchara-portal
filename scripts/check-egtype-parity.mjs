@@ -122,6 +122,24 @@ for (const rel of taglineFiles) {
   }
 }
 
+// page.tsx は ALL_CHARACTERS を import できるため、レンダー本文の総数は必ず
+// {ALL_CHARACTERS.length} で駆動すべき(Day49)。だが「N体のエグかわ」以外の言い回し
+// 例「32 キャラに判定」(Day61 検出)はタグラインガードも動的化も外れてハードコードが
+// 生き残りうる。コメントを除いた本文に 2桁の「N体/Nキャラ」リテラルが残っていないかを
+// 検査し、静かな stale 化を封じる(メタ/OG は import 不可のため上のタグラインガード担当)。
+{
+  const rel = 'app/page.tsx'
+  let body = fs.readFileSync(path.join(PORTAL_DIR, rel), 'utf8')
+  body = body.replace(/\{\/\*[\s\S]*?\*\/\}/g, '') // JSX ブロックコメント除去
+  body = body.replace(/^\s*\/\/.*$/gm, '')          // 行頭 JS コメント除去(URL の // は残す)
+  const hardRe = /(\d{2})\s*(体|キャラ)/g
+  let hm
+  while ((hm = hardRe.exec(body))) {
+    console.log(`✗ 総数ハードコード ${rel}: "${hm[1]}${hm[2]}" はレンダー本文に直書き。{ALL_CHARACTERS.length} で駆動すること`)
+    issues++
+  }
+}
+
 if (issues === 0) {
   console.log(`[parity] ✓ portal ⇄ egtype 整合 (${total}体 name/animal/theme/catchphrase/dangerRank + 画像 全一致)`)
   process.exit(0)
