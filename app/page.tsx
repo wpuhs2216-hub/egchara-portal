@@ -62,7 +62,7 @@ interface Product {
   meta: { label: string; value: string }[]
 }
 
-// エグタイプ 32 キャラ全員。正解データ: egtype/src/data/types.ts + new-characters.ts より
+// エグタイプ 全キャラ。正解データ: egtype/src/data/types.ts + new-characters.ts より
 // dangerRank S → A → B → C 順に並べ替え（図鑑の主役）
 const ALL_CHARACTERS: Character[] = [
   { id: "GMCK", name: "ぶるとら", animal: "トラ", theme: "全賭け冒険家", catchphrase: "次は取り返すから", dangerRank: "S" },
@@ -241,7 +241,7 @@ export default function Home() {
         )}
       </nav>
 
-      {/* Hero: 32体のエグかわ妖精たち */}
+      {/* Hero: エグかわ妖精たち */}
       <section className="relative max-w-6xl mx-auto px-4 md:px-6 pt-16 md:pt-28 pb-12 md:pb-16 overflow-hidden">
         {/* 装飾: 粘土風のふわふわブロブ */}
         <div
@@ -297,7 +297,7 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Hero 直下: 32体の顔を横スクロールマーキーで即見せ（キャラ主役の証明） */}
+        {/* Hero 直下: 全キャラの顔を横スクロールマーキーで即見せ（キャラ主役の証明） */}
         <div className="relative mt-12 md:mt-16 -mx-4 md:-mx-6 overflow-hidden marquee-mask">
           <div className="flex gap-4 md:gap-5 marquee-track w-max py-2 px-4">
             {[...ALL_CHARACTERS, ...ALL_CHARACTERS].map((c, i) => (
@@ -351,7 +351,7 @@ export default function Home() {
         })()}
       </section>
 
-      {/* CHARACTERS: 32体の図鑑（サイトの主役・全員を一覧表示） */}
+      {/* CHARACTERS: 全キャラの図鑑（サイトの主役・全員を一覧表示） */}
       <section id="characters" className="max-w-6xl mx-auto px-4 md:px-6 py-16 md:py-24">
         <div className="flex items-end justify-between gap-6 mb-9 flex-col sm:flex-row">
           <div>
@@ -370,7 +370,7 @@ export default function Home() {
           </div>
         </div>
 
-        {/* 図鑑グリッド: 32体を全員カード表示。これがサイトの中心 */}
+        {/* 図鑑グリッド: 全キャラをカード表示。これがサイトの中心 */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-5 mb-9">
           {ALL_CHARACTERS.map((c) => (
             <Link

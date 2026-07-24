@@ -132,7 +132,7 @@ for (const rel of taglineFiles) {
   let body = fs.readFileSync(path.join(PORTAL_DIR, rel), 'utf8')
   body = body.replace(/\{\/\*[\s\S]*?\*\/\}/g, '') // JSX ブロックコメント除去
   body = body.replace(/^\s*\/\/.*$/gm, '')          // 行頭 JS コメント除去(URL の // は残す)
-  const hardRe = /(\d{2})\s*(体|キャラ)/g
+  const hardRe = /(\d{2})\s*(体|キャラ|種|人)/g
   let hm
   while ((hm = hardRe.exec(body))) {
     console.log(`✗ 総数ハードコード ${rel}: "${hm[1]}${hm[2]}" はレンダー本文に直書き。{ALL_CHARACTERS.length} で駆動すること`)
