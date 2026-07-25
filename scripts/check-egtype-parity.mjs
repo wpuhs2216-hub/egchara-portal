@@ -138,6 +138,16 @@ for (const rel of taglineFiles) {
     console.log(`✗ 総数ハードコード ${rel}: "${hm[1]}${hm[2]}" はレンダー本文に直書き。{ALL_CHARACTERS.length} で駆動すること`)
     issues++
   }
+
+  // 実績カウンタの「あそべる実験」数は EXPERIMENTS.length 駆動が正(別所の「ぜんぶで N」も
+  // {EXPERIMENTS.length})。stat 値だけ数値直書きだと EXPERIMENTS 増減で静かに stale 化する
+  // (Day67 検出: value:"7" が直書きで残っていた)。数値直書きを禁じ動的化を強制する。
+  const expStatRe = /label:\s*"あそべる実験",\s*value:\s*"(\d+)"/
+  const em = expStatRe.exec(body)
+  if (em) {
+    console.log(`✗ 実験数ハードコード ${rel}: 「あそべる実験」value:"${em[1]}" は直書き。String(EXPERIMENTS.length) で駆動すること`)
+    issues++
+  }
 }
 
 if (issues === 0) {

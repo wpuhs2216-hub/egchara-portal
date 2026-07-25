@@ -323,7 +323,7 @@ export default function Home() {
         {(() => {
           const stats = [
             { label: "キャラクター", value: String(ALL_CHARACTERS.length), delta: "全員エグかわ", color: "var(--primary)" },
-            ...(SHOW_PLAYGROUND ? [{ label: "あそべる実験", value: "7", delta: "PLAYGROUND", color: "var(--pop-cyan)" }] : []),
+            ...(SHOW_PLAYGROUND ? [{ label: "あそべる実験", value: String(EXPERIMENTS.length), delta: "PLAYGROUND", color: "var(--pop-cyan)" }] : []),
             { label: "スピンオフ", value: "1", delta: "ぺかりんちんちろ", color: "var(--pop-pink)" },
             { label: "稼働日数", value: `${uptimeDays}日`, delta: "2026-02-20 から", color: "var(--pop-orange)" },
           ]
