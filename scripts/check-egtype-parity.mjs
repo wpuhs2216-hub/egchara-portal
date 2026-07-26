@@ -150,6 +150,26 @@ for (const rel of taglineFiles) {
   }
 }
 
+// --- NOXA STATUS 実数コピーの drift ガード(Day73) ---
+// NOXA トップ STATUS 帯の「SUB PRODUCTS」「PLANNED」は配列(SUB_PRODUCTS / FEATURES)の実数を
+// 指す。stat 値を数値直書きにすると配列増減で静かに stale 化する(Day67「あそべる実験」・
+// page.tsx 総数と同クラス)。SUB PRODUCTS は String(SUB_PRODUCTS.length)、PLANNED は FEATURES の
+// item 総数 +"+" 駆動が正。数値直書き(quoted リテラル)を禁じ再ハードコードを exit1 で検知する。
+{
+  const rel = 'app/noxa/page.tsx'
+  const src = fs.readFileSync(path.join(PORTAL_DIR, rel), 'utf8')
+  const subStat = /label:\s*"SUB PRODUCTS",\s*value:\s*"(\d+)"/.exec(src)
+  if (subStat) {
+    console.log(`✗ NOXA STATUS ハードコード ${rel}: 「SUB PRODUCTS」value:"${subStat[1]}" は直書き。String(SUB_PRODUCTS.length) で駆動すること`)
+    issues++
+  }
+  const planStat = /label:\s*"PLANNED",\s*value:\s*"(\d+\+?)"/.exec(src)
+  if (planStat) {
+    console.log(`✗ NOXA STATUS ハードコード ${rel}: 「PLANNED」value:"${planStat[1]}" は直書き。FEATURES の item 総数で駆動すること`)
+    issues++
+  }
+}
+
 if (issues === 0) {
   console.log(`[parity] ✓ portal ⇄ egtype 整合 (${total}体 name/animal/theme/catchphrase/dangerRank + 画像 全一致)`)
   process.exit(0)

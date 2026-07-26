@@ -258,8 +258,10 @@ export default function NoxaPage() {
         <div className="border-y border-dashed border-border py-6 md:py-7 grid grid-cols-2 md:grid-cols-4 gap-y-5 md:gap-y-0 font-mono">
           {[
             { label: "STATUS", value: "CONCEPT", delta: "構想段階" },
-            { label: "SUB PRODUCTS", value: "2", delta: "先行実装中" },
-            { label: "PLANNED", value: "17+", delta: "本体の実装予定機能" },
+            // SUB PRODUCTS / PLANNED は配列(SUB_PRODUCTS / FEATURES)の実数を指す。
+            // 数値直書きだと配列増減で stat だけ stale 化するため実配列から駆動する(Day73)。
+            { label: "SUB PRODUCTS", value: String(SUB_PRODUCTS.length), delta: "先行実装中" },
+            { label: "PLANNED", value: `${FEATURES.reduce((n, c) => n + c.items.length, 0)}+`, delta: "本体の実装予定機能" },
             { label: "TARGET", value: "ALL", delta: "ホスト・キャバ・バー" },
           ].map((cell, i) => (
             <div
