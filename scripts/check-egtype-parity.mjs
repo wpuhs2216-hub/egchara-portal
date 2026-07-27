@@ -170,6 +170,29 @@ for (const rel of taglineFiles) {
   }
 }
 
+// --- OG 画像フォント subset の網羅ガード(Day76) ---
+// opengraph-image.tsx は Google Font を text=OG_TEXT で subset 取得する。OG_TEXT が実描画テキストの
+// 文字を取りこぼすと、そのグリフ(「。」「×」「.」等)が OG/Twitter 共有カードで欠ける(実際に発生していた)。
+// OG_TEXT を実描画定数(SUB_HEADLINE/SUB_TAGLINE/SITE_URL)の機械連結にし、JSX でも同じ定数を描画する
+// ことで「描画文字 ⊆ subset」を構造的に保証する。ここではその構造(手動リテラルへの逆戻り)が
+// 崩れていないかを固定する。
+{
+  const rel = 'app/opengraph-image.tsx'
+  const src = fs.readFileSync(path.join(PORTAL_DIR, rel), 'utf8')
+  // OG_TEXT が3定数の機械連結であること(手動リテラル直書きに戻すと subset 取りこぼしが再発)。
+  if (!/const OG_TEXT = SUB_HEADLINE \+ SUB_TAGLINE \+ SITE_URL/.test(src)) {
+    console.log(`✗ OG subset ${rel}: OG_TEXT が実描画定数の機械連結でない(手動リテラルは subset 取りこぼしを招く)`)
+    issues++
+  }
+  // JSX が同じ定数を描画していること(インライン文字列に戻すと subset とドリフトする)。
+  for (const name of ['SUB_HEADLINE', 'SUB_TAGLINE', 'SITE_URL']) {
+    if (!src.includes(`{${name}}`)) {
+      console.log(`✗ OG subset ${rel}: 描画に {${name}} を使っていない(subset と描画がドリフトしうる)`)
+      issues++
+    }
+  }
+}
+
 if (issues === 0) {
   console.log(`[parity] ✓ portal ⇄ egtype 整合 (${total}体 name/animal/theme/catchphrase/dangerRank + 画像 全一致)`)
   process.exit(0)

@@ -16,8 +16,13 @@ export const alt = 'エグキャラ — 32体のエグかわ妖精たち。'
 export const size = { width: 1200, height: 630 }
 export const contentType = 'image/png'
 
-// OG 画像に描画するすべての日本語・英数字を列挙して subset で取得
-const OG_TEXT = '32体のエグかわ妖精たち自虐妖精語匂わせポエムで生まれたキャラクターegshugycom'
+// OG 画像に実描画するテキスト。フォント subset(OG_TEXT)はこれらを機械連結して構築するため、
+// 文言を変えても subset の取りこぼし(「。」「×」「.」等のグリフ欠け=手動列挙時に漏れていた)が
+// 起きない。JSX でも同じ定数を描画し、描画文字 ⊆ subset を構造的に保証する。
+const SUB_HEADLINE = '32体のエグかわ妖精たち。'
+const SUB_TAGLINE = '自虐 × 妖精語 × 匂わせポエムで生まれたキャラクター'
+const SITE_URL = 'egshugy.com'
+const OG_TEXT = SUB_HEADLINE + SUB_TAGLINE + SITE_URL
 
 async function loadGoogleFont(family: string, weight: number, text: string): Promise<ArrayBuffer | null> {
   try {
@@ -118,7 +123,7 @@ export default async function OGImage() {
             zIndex: 1,
           }}
         >
-          32体のエグかわ妖精たち。
+          {SUB_HEADLINE}
         </div>
         <div
           style={{
@@ -130,7 +135,7 @@ export default async function OGImage() {
             zIndex: 1,
           }}
         >
-          自虐 × 妖精語 × 匂わせポエムで生まれたキャラクター
+          {SUB_TAGLINE}
         </div>
 
         {/* 右下: URL */}
@@ -145,7 +150,7 @@ export default async function OGImage() {
             display: 'flex',
           }}
         >
-          egshugy.com
+          {SITE_URL}
         </div>
       </div>
     ),
