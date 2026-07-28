@@ -228,6 +228,22 @@ for (const rel of taglineFiles) {
   }
 }
 
+// --- OG 画像 JSX に「定数を経由しない生 CJK テキスト」が無いことの共通ガード(Day79 PM) ---
+// 上の2ガードは「subset 連結に足し忘れた定数」は検知するが、JSX に定数を経由せず生の日本語を
+// 直接ベタ書きされた場合(例: 新チップ <div>新機能</div>)は素通りし、その文字は subset に載らず
+// グリフ欠けになる。両 OG の JSX テキストノード(>...<)に生 CJK が無い(＝全て {定数} 経由)ことを
+// 固定し、この最後の抜け道を塞ぐ。style/コメント/属性は {} を含むため対象外(自然に除外される)。
+{
+  const bareCjk = />([^<>{}]*[぀-ヿ一-鿿ー][^<>{}]*)</g
+  for (const rel of ['app/opengraph-image.tsx', 'app/noxa/opengraph-image.tsx']) {
+    const src = fs.readFileSync(path.join(PORTAL_DIR, rel), 'utf8')
+    for (const m of src.matchAll(bareCjk)) {
+      console.log(`✗ OG subset ${rel}: JSX に生 CJK テキスト「${m[1].trim()}」(定数化して subset 連結に足すこと)`)
+      issues++
+    }
+  }
+}
+
 if (issues === 0) {
   console.log(`[parity] ✓ portal ⇄ egtype 整合 (${total}体 name/animal/theme/catchphrase/dangerRank + 画像 全一致)`)
   process.exit(0)
