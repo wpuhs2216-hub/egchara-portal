@@ -15,7 +15,29 @@ export const alt = "NOXA — 夜職 DX プラットフォーム"
 export const size = { width: 1200, height: 630 }
 export const contentType = "image/png"
 
-const OG_TEXT = "夜職DXプラットフォームヨルログのみしゅぎ店舗データキャスト記録コンプラ統合NOXA2026egshugycom田口修平"
+// OG 画像の実描画テキストを font 別に定数化し、Google Font の subset(text=...)を
+// これらの機械連結で構築する。こうすると「描画文字 ⊆ subset」が構造的に保証され、
+// 手動リテラルの subset が実描画文字を取りこぼしてグリフが欠ける不具合(Day76 で主 OG を
+// 是正した同クラス)を NOXA OG でも構造的に封じる。定数を編集/追加したら JSX もこの定数を
+// 描画し subset 連結にも足すこと(check-egtype-parity.mjs の NOXA OG ガードが逆戻りを検知)。
+//
+// Noto Sans JP で描画するテキスト
+const OG_SUBTITLE = "夜職 DX プラットフォーム — 構想"
+const OG_CONCEPT = "Concept,"
+const OG_NOT_LAUNCHED = "not launched yet."
+const OG_CHIP_YORULOG = "YoruLog"
+const OG_CHIP_NOMISHUGY = "nomishugy"
+const OG_CHIP_CORE = "Noxa Core — 構想中"
+// Geist Mono で描画するテキスト
+const OG_LAB = "EGSHUGY LAB"
+const OG_NOXA = "NOXA"
+const OG_SLASH = "/"
+const OG_YEAR = "// 2026"
+const OG_URL = "// egshugy.com/noxa"
+
+// subset(実描画定数の機械連結)。スペースは字形不要のため subset に無くても問題ない。
+const OG_TEXT = OG_SUBTITLE + OG_CONCEPT + OG_NOT_LAUNCHED + OG_CHIP_YORULOG + OG_CHIP_NOMISHUGY + OG_CHIP_CORE
+const MONO_SUBSET = OG_LAB + OG_NOXA + OG_SLASH + OG_YEAR + OG_URL
 
 async function loadGoogleFont(family: string, weight: number, text: string): Promise<ArrayBuffer | null> {
   try {
@@ -40,7 +62,7 @@ export default async function NoxaOGImage() {
     loadGoogleFont("Noto Sans JP", 900, OG_TEXT),
     loadGoogleFont("Noto Sans JP", 700, OG_TEXT),
     loadGoogleFont("Noto Sans JP", 400, OG_TEXT),
-    loadGoogleFont("Geist Mono", 700, "NOXA2026egshugycomEGSHUGYLAB"),
+    loadGoogleFont("Geist Mono", 700, MONO_SUBSET),
   ])
 
   // Noxa ロゴを base64 で埋め込む
@@ -111,11 +133,11 @@ export default async function NoxaOGImage() {
             zIndex: 1,
           }}
         >
-          <div style={{ display: "flex" }}>EGSHUGY LAB</div>
-          <div style={{ display: "flex", color: "#666" }}>/</div>
-          <div style={{ display: "flex", color: "#6D4FE8", fontWeight: 700 }}>NOXA</div>
+          <div style={{ display: "flex" }}>{OG_LAB}</div>
+          <div style={{ display: "flex", color: "#666" }}>{OG_SLASH}</div>
+          <div style={{ display: "flex", color: "#6D4FE8", fontWeight: 700 }}>{OG_NOXA}</div>
           <div style={{ flex: 1, display: "flex" }} />
-          <div style={{ display: "flex", color: "#A89BFF" }}>// 2026</div>
+          <div style={{ display: "flex", color: "#A89BFF" }}>{OG_YEAR}</div>
         </div>
 
         {/* メイン: ロゴ + NOXA テキスト */}
@@ -155,7 +177,7 @@ export default async function NoxaOGImage() {
                 display: "flex",
               }}
             >
-              夜職 DX プラットフォーム — 構想
+              {OG_SUBTITLE}
             </div>
             <div
               style={{
@@ -168,7 +190,7 @@ export default async function NoxaOGImage() {
                 display: "flex",
               }}
             >
-              NOXA
+              {OG_NOXA}
             </div>
             <div
               style={{
@@ -180,8 +202,8 @@ export default async function NoxaOGImage() {
                 display: "flex",
               }}
             >
-              Concept,
-              <span style={{ color: "#A89BFF", marginLeft: "10px", display: "flex" }}>not launched yet.</span>
+              {OG_CONCEPT}
+              <span style={{ color: "#A89BFF", marginLeft: "10px", display: "flex" }}>{OG_NOT_LAUNCHED}</span>
             </div>
           </div>
         </div>
@@ -206,7 +228,7 @@ export default async function NoxaOGImage() {
                 display: "flex",
               }}
             >
-              YoruLog
+              {OG_CHIP_YORULOG}
             </div>
             <div
               style={{
@@ -219,7 +241,7 @@ export default async function NoxaOGImage() {
                 display: "flex",
               }}
             >
-              nomishugy
+              {OG_CHIP_NOMISHUGY}
             </div>
             <div
               style={{
@@ -232,7 +254,7 @@ export default async function NoxaOGImage() {
                 display: "flex",
               }}
             >
-              Noxa Core — 構想中
+              {OG_CHIP_CORE}
             </div>
           </div>
 
@@ -247,7 +269,7 @@ export default async function NoxaOGImage() {
             }}
           >
             <div style={{ fontSize: "22px", color: "#9ca3af", display: "flex" }}>
-              EGSHUGY LAB
+              {OG_LAB}
             </div>
             <div style={{ flex: 1, display: "flex" }} />
             <div
@@ -258,7 +280,7 @@ export default async function NoxaOGImage() {
                 display: "flex",
               }}
             >
-              // egshugy.com/noxa
+              {OG_URL}
             </div>
           </div>
         </div>

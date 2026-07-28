@@ -193,6 +193,41 @@ for (const rel of taglineFiles) {
   }
 }
 
+// --- NOXA OG 画像フォント subset の網羅ガード(Day79) ---
+// noxa/opengraph-image.tsx は Noto Sans JP と Geist Mono の2 font を text=subset で subset 取得する。
+// 手動 subset リテラルが実描画文字を取りこぼすと、そのグリフ(「—」「構想」「Concept,」「/」等)が
+// NOXA 共有カードで欠ける(実際に 23 字欠けていた・Day76 の主 OG と同クラス)。実描画テキストを
+// font 別の OG_ 定数にし、OG_TEXT(Noto)/MONO_SUBSET(Mono) をそれらの機械連結にして JSX でも同定数を
+// 描画することで「描画文字 ⊆ subset」を構造保証する。ここでは JSX が描画する全 OG_ 定数が
+// いずれかの subset 連結に含まれること(＝新テキストを subset に足し忘れていないこと)を固定する。
+{
+  const rel = 'app/noxa/opengraph-image.tsx'
+  const src = fs.readFileSync(path.join(PORTAL_DIR, rel), 'utf8')
+  const notoExpr = (src.match(/const OG_TEXT = ([^\n]+)/) || [])[1] || ''
+  const monoExpr = (src.match(/const MONO_SUBSET = ([^\n]+)/) || [])[1] || ''
+  // subset は OG_ 定数の + 連結であること(手動リテラルに戻すと取りこぼしが再発)。
+  if (!/\+/.test(notoExpr) || !/OG_[A-Z_]+/.test(notoExpr)) {
+    console.log(`✗ NOXA OG subset ${rel}: OG_TEXT が OG_ 定数の機械連結でない`)
+    issues++
+  }
+  if (!/\+/.test(monoExpr) || !/OG_[A-Z_]+/.test(monoExpr)) {
+    console.log(`✗ NOXA OG subset ${rel}: MONO_SUBSET が OG_ 定数の機械連結でない`)
+    issues++
+  }
+  // subset 連結に含まれる定数名の集合と、JSX が描画する定数名の集合。
+  const inSubset = new Set([
+    ...[...notoExpr.matchAll(/OG_[A-Z_]+/g)].map((m) => m[0]),
+    ...[...monoExpr.matchAll(/OG_[A-Z_]+/g)].map((m) => m[0]),
+  ])
+  const rendered = [...new Set([...src.matchAll(/\{(OG_[A-Z_]+)\}/g)].map((m) => m[1]))]
+  for (const name of rendered) {
+    if (!inSubset.has(name)) {
+      console.log(`✗ NOXA OG subset ${rel}: 描画定数 ${name} が subset 連結に無い(グリフ欠けの恐れ)`)
+      issues++
+    }
+  }
+}
+
 if (issues === 0) {
   console.log(`[parity] ✓ portal ⇄ egtype 整合 (${total}体 name/animal/theme/catchphrase/dangerRank + 画像 全一致)`)
   process.exit(0)
