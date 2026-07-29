@@ -125,6 +125,33 @@ async function check(url) {
 // 有効化される(portal と egtype はセットでデプロイする運用)。egtype 未デプロイ中に
 // 新16体の /egtype/types/<id>/ が404になるのは既知・想定内で、portal の cron 定点観測を
 // 常時 red にしない。--strict 指定時のみ soft 失敗も致命(exit 1)にする。
+// --- ローカル静的アセットの実在チェック(HTTP前・メタ/JSX のルート直下画像参照) ---
+// OG/twitter/icon 等メタの画像参照や JSX の src は check-links の href 抽出に載らず(href ではない)、
+// 実在しない public アセットを指していても HTTP チェックの網から漏れる(実際 /stamps の openGraph が
+// 実在しない /og-image.png を指し共有カードが 404 だった=Day82)。app 配下のルート直下画像リテラル
+// ("/xxx.png" 等・単一セグメント)が public/ に実在することをファイルシステムで固定する。
+// /egtype/... のような多セグメント(別アプリ配信)や ${...} 動的パスは対象外(自然に除外される)。
+function scanLocalImageRefs() {
+  const refs = new Set()
+  const stack = [path.join(ROOT, 'app')]
+  const re = /"(\/[A-Za-z0-9_-]+\.(?:png|jpg|jpeg|webp|svg|gif|ico))"/g
+  while (stack.length) {
+    const dir = stack.pop()
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, e.name)
+      if (e.isDirectory()) stack.push(full)
+      else if (e.name.endsWith('.tsx')) {
+        const src = fs.readFileSync(full, 'utf8')
+        for (const m of src.matchAll(re)) refs.add(m[1])
+      }
+    }
+  }
+  return [...refs]
+}
+const localImageRefs = scanLocalImageRefs()
+const localMissing = localImageRefs.filter((p) => !fs.existsSync(path.join(ROOT, 'public', p)))
+for (const p of localMissing) console.log(`  ✗ MISSING  [ローカル静的] public${p} が存在しない(メタ/JSX が参照・共有カード等が404になる)`)
+
 const STRICT = process.argv.includes('--strict')
 const targets = [
   ...internal.map((p) => ({ url: BASE + p, cat: '内部', soft: false })),
@@ -145,14 +172,14 @@ if (softBad.length > 0) {
   console.log(`[check-links] ⚠ egtype依存(soft) ${softBad.length}/${charPages.length} 件が未到達 — egtype 本番デプロイ待ちなら想定内(portal と egtype はセットでデプロイ)。デプロイ後は --strict で厳格確認。`)
 }
 
-const fatal = hardBad.length > 0 || (STRICT && softBad.length > 0)
+const fatal = hardBad.length > 0 || localMissing.length > 0 || (STRICT && softBad.length > 0)
 if (!fatal && hardBad.length === 0 && softBad.length === 0) {
-  console.log(`[check-links] ✓ 全${results.length}件 OK`)
+  console.log(`[check-links] ✓ 全${results.length}件 OK / ローカル静的アセット ${localImageRefs.length}件実在`)
   process.exit(0)
 } else if (!fatal) {
-  console.log(`[check-links] ✓ portal自前 ${results.length - softBad.length}/${results.length - softBad.length} 件 OK（soft ${softBad.length}件は警告のみ）`)
+  console.log(`[check-links] ✓ portal自前 ${results.length - softBad.length}/${results.length - softBad.length} 件 OK（soft ${softBad.length}件は警告のみ）/ ローカル静的アセット ${localImageRefs.length}件実在`)
   process.exit(0)
 } else {
-  console.log(`[check-links] ✗ 致命 ${hardBad.length}件${STRICT ? ` + soft ${softBad.length}件` : ''} / 全${results.length}件`)
+  console.log(`[check-links] ✗ 致命 ${hardBad.length}件${localMissing.length ? ` + ローカル静的欠落 ${localMissing.length}件` : ''}${STRICT ? ` + soft ${softBad.length}件` : ''} / 全${results.length}件`)
   process.exit(1)
 }

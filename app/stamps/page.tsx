@@ -1,20 +1,22 @@
 import Link from "next/link"
 import { ArrowLeft, ExternalLink, ShoppingCart } from "lucide-react"
 
+// og/twitter 画像は指定しない。指定すると app/opengraph-image.tsx の自動生成 OG を上書きして
+// しまうが、以前は実在しない静的 /og-image.png を指していたため /stamps 共有時に OG 画像が 404
+// だった(ルートOGは動的生成で /og-image.png は誰も生成しない)。images を外し、root/noxa と同じく
+// app/opengraph-image.tsx の生成 OG を継承する。
 export const metadata = {
     title: "LINE Stamps | えぐしゅぎ ラボ",
     description: "えぐしゅぎオリジナルのLINEスタンプ一覧",
     openGraph: {
         title: "LINE Stamps | えぐしゅぎ ラボ",
         description: "えぐしゅぎオリジナルのLINEスタンプ一覧",
-        images: [{ url: "/og-image.png", width: 1200, height: 630 }],
         type: "website",
     },
     twitter: {
         card: "summary_large_image",
         title: "LINE Stamps | えぐしゅぎ ラボ",
         description: "えぐしゅぎオリジナルのLINEスタンプ一覧",
-        images: ["/og-image.png"],
     },
 }
 
