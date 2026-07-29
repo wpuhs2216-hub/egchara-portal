@@ -8,6 +8,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { fetchWithRetry } from './fetch-with-retry.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -106,18 +107,11 @@ const externals = [...new Set(
   [...allSrc.matchAll(/https:\/\/[a-zA-Z0-9./_@-]+/g)].map((m) => m[0])
 )].filter((u) => !EXCLUDE.test(u))
 
+// 一時失敗(タイムアウト/瞬断/5xx/429)は fetchWithRetry が数回リトライしてから確定する。
+// 単発フレークで死活監視が「致命」誤警報を出すのを防ぐ(恒久404はリトライせず即検知)。
 async function check(url) {
-  try {
-    const res = await fetch(url, {
-      method: 'GET',
-      redirect: 'follow',
-      signal: AbortSignal.timeout(15000),
-      headers: { 'User-Agent': 'Mozilla/5.0 (egchara-linkcheck)' },
-    })
-    return { url, status: res.status, ok: res.ok }
-  } catch (e) {
-    return { url, status: 0, ok: false, err: e.name }
-  }
+  const r = await fetchWithRetry(url)
+  return { url, status: r.status, ok: r.ok, err: r.err }
 }
 
 // カテゴリ分離: portal自前で常時live であるべきもの(hard)と、egtype の別デプロイに
