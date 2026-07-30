@@ -244,8 +244,42 @@ for (const rel of taglineFiles) {
   }
 }
 
+// --- 図鑑の危険度並び順ガード(Day88) ---
+// app/page.tsx の ALL_CHARACTERS は 図鑑(CHARACTERS グリッド)を array 順そのままで描画する
+// (ALL_CHARACTERS.map・client sort なし)。表示契約は「旧16体ブロック(危険度 S→A→B→C 降順)
+// → 新16体(isNew)ブロック(同 S→A→B→C 降順)」の2コホート。将来キャラを誤った危険度位置に
+// 挿入/追加すると 図鑑の S/A/B/C バッジがバラついて見えるが、従来はコメントで並べ替えと述べる
+// だけで無検査だった。①旧ブロックが新ブロックより前に連続(old-first) ②各コホート内が危険度
+// 非増加(S→A→B→C 降順) を固定する。
+{
+  const rel = 'app/page.tsx'
+  const src = fs.readFileSync(path.join(PORTAL_DIR, rel), 'utf8')
+  const start = src.indexOf('const ALL_CHARACTERS')
+  const block = src.slice(start, src.indexOf('\n]', start))
+  const RANK_ORDER = { S: 0, A: 1, B: 2, C: 3 }
+  const rows = [...block.matchAll(/\{ id: "([^"]+)"[^\n]*?dangerRank: "([SABC])"([^\n]*?)\}/g)]
+    .map((m) => ({ id: m[1], rank: m[2], isNew: m[3].includes('isNew: true') }))
+  // ① 旧(isNew でない)が全て 新(isNew) より前＝コホートが連続で old-first
+  const firstNew = rows.findIndex((r) => r.isNew)
+  if (firstNew !== -1) {
+    for (const r of rows.slice(firstNew).filter((r) => !r.isNew)) {
+      console.log(`✗ 図鑑並び順 ${rel}: 旧キャラ ${r.id} が新16体ブロックより後にある(旧→新のコホート順が崩れている)`)
+      issues++
+    }
+  }
+  // ② 各コホート内が危険度 非増加(S→A→B→C 降順)
+  for (const [label, list] of [['旧16', rows.filter((r) => !r.isNew)], ['新16', rows.filter((r) => r.isNew)]]) {
+    for (let i = 1; i < list.length; i++) {
+      if (RANK_ORDER[list[i].rank] < RANK_ORDER[list[i - 1].rank]) {
+        console.log(`✗ 図鑑並び順 ${rel}: ${label}ブロックで危険度が S→A→B→C 降順でない(${list[i - 1].id}=${list[i - 1].rank} の後に ${list[i].id}=${list[i].rank})`)
+        issues++
+      }
+    }
+  }
+}
+
 if (issues === 0) {
-  console.log(`[parity] ✓ portal ⇄ egtype 整合 (${total}体 name/animal/theme/catchphrase/dangerRank + 画像 全一致)`)
+  console.log(`[parity] ✓ portal ⇄ egtype 整合 (${total}体 name/animal/theme/catchphrase/dangerRank + 画像 全一致・図鑑並び順OK)`)
   process.exit(0)
 } else {
   console.log(`\n[parity] ✗ ドリフト ${issues} 件 / portal ${total}体。egtype 正本に合わせて app/page.tsx の ALL_CHARACTERS を更新してください。`)

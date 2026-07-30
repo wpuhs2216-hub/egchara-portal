@@ -63,7 +63,9 @@ interface Product {
 }
 
 // エグタイプ 全キャラ。正解データ: egtype/src/data/types.ts + new-characters.ts より
-// dangerRank S → A → B → C 順に並べ替え（図鑑の主役）
+// 図鑑(CHARACTERS グリッド)は ALL_CHARACTERS を array 順そのままで描画する（client sort なし）。
+// 表示順の契約: 旧16体ブロック → 新16体(isNew)ブロックの2コホートで、各コホート内は
+// dangerRank S → A → B → C の降順。この並び順は check-egtype-parity.mjs の「図鑑並び順ガード」で固定。
 const ALL_CHARACTERS: Character[] = [
   { id: "GMCK", name: "ぶるとら", animal: "トラ", theme: "全賭け冒険家", catchphrase: "次は取り返すから", dangerRank: "S" },
   { id: "GRCK", name: "ごりおし", animal: "ゴリラ", theme: "圧の王様", catchphrase: "お前のためを思って言ってるんだ", dangerRank: "S" },
