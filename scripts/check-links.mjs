@@ -9,6 +9,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fetchWithRetry } from './fetch-with-retry.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs } from './lib/extract-targets.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -82,12 +83,23 @@ function collectAppInternal(dir) {
 }
 const pageNavInternal = collectAppInternal(path.join(ROOT, 'app'))
 const internal = [...new Set([...featuredInternal, ...experimentInternal, ...pageNavInternal])]
-const charIds = [...page.matchAll(/\{ id: "([A-Za-z]+)", name: "/g)].map((m) => m[1])
+const charIds = extractCharIds(page)
+// 抽出0件の floor(Day91): 抽出は page.tsx の記法に依存するため、整形や ID 規則の変更で
+// 黙って0件になりうる。そのまま進むと「キャラ画像0 + キャラ型頁0 件を検査して✓全件OK」と
+// いう完全な false-green になり、32体の死活監視が消えたことに誰も気づけない。抽出が死んだ
+// ことそれ自体を致命として即座に落とす。
+if (charIds.length === 0) {
+  console.log('  ✗ 抽出失敗 [キャラ] app/page.tsx の ALL_CHARACTERS から id を1件も抽出できない')
+  console.log('[check-links] ✗ 致命: キャラ抽出が0件（記法変更で監視が無言化した可能性）。scripts/lib/extract-targets.mjs の CHAR_ID_RE を確認すること。')
+  process.exit(1)
+}
 const charImages = charIds.map((id) => `/egtype/characters/${id}.webp`)
 // 図鑑カードは /egtype/types/<id>/ へディープリンクする（Day23）。リンク切れを死活監視する。
 const charPages = charIds.map((id) => `/egtype/types/${id}/`)
 
-// 3) 主要外部リンク（components/ と app/ の全 tsx から抽出し、CDN/フォント等のノイズを除外）
+// 3) 主要外部リンク（live なソースから抽出し、CDN/フォント等のノイズを除外）
+// 抽出規則は scripts/lib/extract-targets.mjs（クエリ・@handle を含む実URLを拾い、
+// テンプレートリテラルの動的URLは捨てる）。
 const EXCLUDE = /w3\.org|fonts\.|line-scdn|embed\.js|placeholder|schema\.org/
 function collectTsx(dir) {
   let out = ''
@@ -98,14 +110,29 @@ function collectTsx(dir) {
   }
   return out
 }
-const allSrc = collectTsx(path.join(ROOT, 'components')) + collectTsx(path.join(ROOT, 'app'))
-// URL 文字クラスに @ を含める。含めないと SNS の @handle リンク
-// (tiktok.com/@diva_egshugy, youtube.com/@diva_shu 等)が @ の手前で切れて
-// バレのトップ URL(tiktok.com/, youtube.com/)として検査され、実アカウント URL の
-// 死活を見ていなかった(常時200のトップだけ叩いて合格していた)。@ を含めて実URLを拾う。
-const externals = [...new Set(
-  [...allSrc.matchAll(/https:\/\/[a-zA-Z0-9./_@-]+/g)].map((m) => m[0])
-)].filter((u) => !EXCLUDE.test(u))
+// components/ は app/ から import された(＝実際にレンダーされる)ものだけを見る。
+// 内部リンクについては featured-apps(Day58/Day64) と collectAppInternal(Day45) で
+// 「デッドコンポーネントの phantom リンクは監視しない」方針を既に採っているのに、
+// 外部URLだけがその方針から漏れて components/ 全体を無条件に舐めていた(Day91)。
+// 実害: 現在 components/ は全ファイルが未 import で、そこから
+//   https://www.tiktok.com/@（テンプレートリテラルが切れた実在しない phantom）
+//   https://x.com/Egshugy ほか、live と食い違う旧 SNS ハンドル4件
+// が hard ターゲットとして叩かれていた。誰も辿れないリンクの404で cron が red になる
+// (＝false-red)一方、live 側のハンドルとの食い違いは検知できないという逆立ちが起きる。
+function collectLiveComponents() {
+  const dir = path.join(ROOT, 'components')
+  if (!fs.existsSync(dir)) return ''
+  let out = ''
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (e.isDirectory()) continue // components/ui 等のサブディレクトリは直接ルートにならない
+    if (!/\.tsx?$/.test(e.name)) continue
+    const base = e.name.replace(/\.tsx?$/, '')
+    if (isImportedByApp(base)) out += fs.readFileSync(path.join(dir, e.name), 'utf8')
+  }
+  return out
+}
+const liveSrc = collectTsx(path.join(ROOT, 'app')) + collectLiveComponents()
+const externals = extractExternalUrls(liveSrc, { exclude: EXCLUDE })
 
 // 一時失敗(タイムアウト/瞬断/5xx/429)は fetchWithRetry が数回リトライしてから確定する。
 // 単発フレークで死活監視が「致命」誤警報を出すのを防ぐ(恒久404はリトライせず即検知)。
@@ -125,24 +152,26 @@ async function check(url) {
 // 実在しない /og-image.png を指し共有カードが 404 だった=Day82)。app 配下のルート直下画像リテラル
 // ("/xxx.png" 等・単一セグメント)が public/ に実在することをファイルシステムで固定する。
 // /egtype/... のような多セグメント(別アプリ配信)や ${...} 動的パスは対象外(自然に除外される)。
-function scanLocalImageRefs() {
+// 抽出規則は scripts/lib/extract-targets.mjs。Day91 で①シングルクォート対応
+// (layout.tsx は全面シングルクォートで書かれており、そこに画像を1行足すだけで
+// Day82 と同じ「実在しない OG 画像を指して共有カードが404」が無検知で再発しえた)
+// ②PWA 必須資産 /manifest.json・/sw.js まで対象化(拡張子が画像でないため無検査だった)。
+function scanLocalAssetRefs() {
   const refs = new Set()
   const stack = [path.join(ROOT, 'app')]
-  const re = /"(\/[A-Za-z0-9_-]+\.(?:png|jpg|jpeg|webp|svg|gif|ico))"/g
   while (stack.length) {
     const dir = stack.pop()
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, e.name)
       if (e.isDirectory()) stack.push(full)
       else if (e.name.endsWith('.tsx')) {
-        const src = fs.readFileSync(full, 'utf8')
-        for (const m of src.matchAll(re)) refs.add(m[1])
+        for (const p of extractLocalAssetRefs(fs.readFileSync(full, 'utf8'))) refs.add(p)
       }
     }
   }
   return [...refs]
 }
-const localImageRefs = scanLocalImageRefs()
+const localImageRefs = scanLocalAssetRefs()
 const localMissing = localImageRefs.filter((p) => !fs.existsSync(path.join(ROOT, 'public', p)))
 for (const p of localMissing) console.log(`  ✗ MISSING  [ローカル静的] public${p} が存在しない(メタ/JSX が参照・共有カード等が404になる)`)
 

@@ -4,7 +4,12 @@
 // 狙い(Day85): check-links の死活監視が一時失敗(タイムアウト/瞬断/5xx/429)を単発で
 // 「致命」誤警報にしていた false-red を、リトライで吸収する挙動として固定する。
 // 恒久失敗(404 等)はリトライせず即検知＝リンク切れの検知力は落とさないことも併せて固定。
+//
+// 追加(Day91): 「何を監視対象として抽出するか」の層(scripts/lib/extract-targets.mjs)も固定する。
+// 抽出が黙って0件になる/URL が途中で切れて別物を叩く、はどちらも「✓ 全件OK」と出るため
+// 実行結果からは気づけない。抽出規則そのものをテストで押さえる。
 import { fetchWithRetry, isTransientStatus } from './fetch-with-retry.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs } from './lib/extract-targets.mjs'
 
 let pass = 0, fail = 0
 const ok = (m) => { pass++; console.log('  ✓', m) }
@@ -61,6 +66,77 @@ if (isTransientStatus(0) && isTransientStatus(429) && isTransientStatus(503) &&
   ok('isTransient分類(0/429/5xx=一時, 404/200=恒久)')
 } else {
   bad('isTransient分類が想定外')
+}
+
+console.log('\n[selftest-check-links] 抽出層(lib/extract-targets)の規則')
+
+// ⑥ クエリ付き URL を切り詰めない。旧実装は文字クラスに ? = & が無く
+//   `.../gtag/js?id=G-XXXX` を `.../gtag/js` として検査していた＝常時200のベースURLだけ
+//   叩いて合格する false-green（Day45 で @ について直した事故と同型）。
+{
+  const src = `<script src="https://www.googletagmanager.com/gtag/js?id=G-J5KGMEKCF4" />`
+  const urls = extractExternalUrls(src)
+  if (urls.length === 1 && urls[0] === 'https://www.googletagmanager.com/gtag/js?id=G-J5KGMEKCF4') {
+    ok('クエリ付きURLを丸ごと抽出(?id=… を切り落とさない)')
+  } else bad(`クエリ付きURLの抽出が想定外: ${JSON.stringify(urls)}`)
+}
+
+// ⑦ @handle も従来どおり切れない（Day45 の回帰）
+{
+  const urls = extractExternalUrls(`href="https://www.tiktok.com/@diva_egshugy"`)
+  if (urls.length === 1 && urls[0].endsWith('/@diva_egshugy')) ok('@handle URL が @ の手前で切れない(Day45 回帰)')
+  else bad(`@handle の抽出が想定外: ${JSON.stringify(urls)}`)
+}
+
+// ⑧ テンプレートリテラルの動的 URL は捨てる。旧実装は `${` の手前で切って
+//   実在しない `https://www.tiktok.com/@` を hard ターゲットとして叩いていた(phantom)。
+{
+  const urls = extractExternalUrls('const U = `https://www.tiktok.com/@${NAME}`')
+  if (urls.length === 0) ok('動的URL(${…})は phantom を作らず捨てる')
+  else bad(`動的URLを実URLとして拾ってしまった: ${JSON.stringify(urls)}`)
+}
+
+// ⑨ exclude(CDN/フォント等ノイズ)が効く
+{
+  const urls = extractExternalUrls('a="https://fonts.googleapis.com/x" b="https://example.com/y"', { exclude: /fonts\./ })
+  if (urls.length === 1 && urls[0] === 'https://example.com/y') ok('exclude 指定でノイズURLを除外')
+  else bad(`exclude が効いていない: ${JSON.stringify(urls)}`)
+}
+
+// ⑩ キャラ id 抽出は空白・改行の入り方に依存しない。ここが記法変更で0件化すると
+//   キャラ画像32＋型頁32の死活監視が丸ごと消えたまま「✓全件OK」になる(check-links 側で
+//   0件を致命にする floor も入れてある)。
+{
+  const oneLine = `{ id: "GRCT", name: "ぺかりん", animal: "ペリカン" },`
+  const reformatted = `{\n  id: "usoron",\n  name: "でまろう",\n  animal: "オオカミ",\n},`
+  const ids = extractCharIds(oneLine + reformatted)
+  if (ids.length === 2 && ids[0] === 'GRCT' && ids[1] === 'usoron') ok('キャラid抽出が1行/整形後の複数行どちらでも効く')
+  else bad(`キャラid抽出が想定外: ${JSON.stringify(ids)}`)
+}
+
+// ⑪ 別配列(EXPERIMENTS の ja: / PRODUCTS の jaName:)を誤ってキャラとして拾わない（負のサニティ）
+{
+  const ids = extractCharIds(`{ id: "wordwolf", ja: "ワードウルフ" },{ id: "yorulog", jaName: "ヨルログ" },`)
+  if (ids.length === 0) ok('キャラ以外の配列(ja:/jaName:)は拾わない(負のサニティ)')
+  else bad(`キャラ以外を誤抽出: ${JSON.stringify(ids)}`)
+}
+
+// ⑫ ローカル静的アセットはシングルクォートでも拾う。layout.tsx は全面シングルクォートで
+//   書かれており、旧実装(ダブルクォート限定)ではそこに画像を1行足すだけで
+//   「実在しない OG 画像を指して共有カードが404」(Day82)が無検知で再発しえた。
+{
+  const refs = extractLocalAssetRefs(`manifest: '/manifest.json'\nimages: ['/og-image.png']\nsrc="/egchara-logo.png"\nregister('/sw.js')`)
+  const want = ['/manifest.json', '/og-image.png', '/egchara-logo.png', '/sw.js']
+  if (want.every((p) => refs.includes(p)) && refs.length === want.length) {
+    ok('ローカル資産をシングル/ダブル両クォートで抽出(manifest.json・sw.js 含む)')
+  } else bad(`ローカル資産の抽出が想定外: ${JSON.stringify(refs)}`)
+}
+
+// ⑬ 別アプリ(egtype)が配信する多セグメントパスは portal の public 実在チェック対象にしない（負のサニティ）
+{
+  const refs = extractLocalAssetRefs(`src={"/egtype/characters/GRCT.webp"}`)
+  if (refs.length === 0) ok('多セグメント(/egtype/…)は portal の実在チェック対象外(負のサニティ)')
+  else bad(`別アプリ配信パスを誤って対象化: ${JSON.stringify(refs)}`)
 }
 
 console.log(`\n[selftest-check-links] 結果: pass=${pass} fail=${fail}`)
