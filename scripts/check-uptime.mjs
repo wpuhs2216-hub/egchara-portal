@@ -11,8 +11,14 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { daysSince } from '../lib/uptime.ts'
+import { findInlineDayDiff } from './lib/detect-inline-daydiff.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+// 走査対象の app ディレクトリ。既定は本物、テスト(selftest-check-uptime)だけが
+// フィクスチャへ差し替える。正本を書き換えずに配線まで検証するための非破壊 override。
+const APP_DIR = process.env.UPTIME_APP_DIR
+  ? path.resolve(process.env.UPTIME_APP_DIR)
+  : path.join(ROOT, 'app')
 const D = 86400000
 const ORIGIN = '2026-02-20T00:00:00+09:00'
 const o = new Date(ORIGIN).getTime()
@@ -42,19 +48,29 @@ check('+365日 = 365', daysSince(ORIGIN, o + 365 * D), 365)
 //      なる(Day58/64 の featured-apps 同クラス)。実際 NOXA は days を計算するだけで一度も
 //      描画しておらず(全履歴で {days} レンダー無し)、旧ガードがその死蔵コードを支えていた。
 //      Day70 で NOXA の死蔵フックを除去し、正の使用は表示ページ(トップ)にだけ課す。
-const INLINE_DATE_DIFF = /getTime\(\)[\s\S]{0,80}1000\s*\*\s*60\s*\*\s*60\s*\*\s*24/
-function collectAppTsx(dir, out = []) {
+//  (3) 検知規則は scripts/lib/detect-inline-daydiff.mjs に切り出し selftest で固定する(Day94)。
+//      旧規則は「getTime() + 1000*60*60*24 の1綴り」だけを見ており、`/ 86400000` 直書き・
+//      `Date.parse()`/`Date.now()` 経由・逆順綴り(24*60*60*1000)を実測で3種とも取りこぼして
+//      「✓ 全チェック通過」と出していた(ガード自身の false-green)。
+function collectAppSources(dir, out = []) {
   for (const e of readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, e.name)
-    if (e.isDirectory()) collectAppTsx(full, out)
-    else if (e.name.endsWith('.tsx')) out.push([path.relative(ROOT, full), readFileSync(full, 'utf8')])
+    if (e.isDirectory()) collectAppSources(full, out)
+    // .tsx だけでなく .ts(ルートハンドラ・メタデータ等)も日数差を書ける場所なので含める。
+    else if (e.name.endsWith('.tsx') || e.name.endsWith('.ts')) {
+      out.push([path.join('app', path.relative(APP_DIR, full)), readFileSync(full, 'utf8')])
+    }
   }
   return out
 }
-const appPages = collectAppTsx(path.join(ROOT, 'app'))
+const appPages = collectAppSources(APP_DIR)
 console.log(`[check-uptime] 生の日数差インラインが全 app ページ(${appPages.length})に残っていないか(負値再発ガード)`)
+// 走査対象が0件だと「1件も違反が無い」と区別が付かず、構成変更で監視が無言化する
+// (Day91 のキャラid抽出0件と同クラス)。floor を置いて致命化する。
+check('走査対象の app ソースが1件以上ある', appPages.length > 0, true)
 for (const [rel, src] of appPages) {
-  check(`${rel}: 生の日数差インラインが無い`, INLINE_DATE_DIFF.test(src), false)
+  const hits = findInlineDayDiff(src)
+  check(`${rel}: 生の日数差インラインが無い${hits.length ? ` — ${hits[0]}` : ''}`, hits.length, 0)
 }
 
 console.log('[check-uptime] 稼働日数を描画するページが daysSince に集約されているか')
