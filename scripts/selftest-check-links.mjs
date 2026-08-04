@@ -15,10 +15,11 @@
 // 本体の targets へ合流しているかの配線の両方を押さえる。
 import fs from 'node:fs'
 import path from 'node:path'
+import os from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { fetchWithRetry, isTransientStatus } from './fetch-with-retry.mjs'
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles } from './lib/extract-targets.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin } from './lib/extract-targets.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -201,23 +202,194 @@ console.log('\n[selftest-check-links] 実ルート列挙層(routesFromPageFiles)
   else bad(`空入力の扱いが想定外: ${JSON.stringify(routes)}`)
 }
 
+// ㉑ 多階層の入れ子ルート。朝は portal に入れ子が1本も無いため、変換が階層を落としていても
+//   実データでは気づけない（下の配線テストの期待値も朝はトップレベル1階層しか見ていなかった）。
+{
+  const { routes } = routesFromPageFiles(['tools/converter/unit/page.tsx'])
+  if (routes.length === 1 && routes[0] === '/tools/converter/unit/') ok('多階層の入れ子ルートを階層を落とさず変換')
+  else bad(`入れ子ルートの変換が想定外: ${JSON.stringify(routes)}`)
+}
+
+// ㉒ mdx/md も実ルートを生む(pageExtensions に mdx を足した構成)。PM(Day97) までは
+//   tsx/ts/jsx/js 以外を routes にも skipped にも載せず**黙って捨てて**おり、
+//   本日封鎖したはずの「監視対象に入らないルート」を自分で作り直していた。
+{
+  const { routes, skipped } = routesFromPageFiles(['blog/page.mdx', 'news/page.md'])
+  if (routes.length === 2 && routes.includes('/blog/') && routes.includes('/news/') && skipped.length === 0) {
+    ok('page.mdx / page.md も実ルートとして拾う(黙って捨てない)')
+  } else bad(`mdx/md の扱いが想定外: ${JSON.stringify({ routes, skipped })}`)
+}
+
+// ㉓ 未知の単一拡張子は「ルート化規則が追いついていない」ものとして skipped に顕在化する。
+//   黙って continue すると Day96 の教訓どおり skip の理由が区別できず false-green になる。
+{
+  const { routes, skipped } = routesFromPageFiles(['future/page.vue'])
+  if (routes.length === 0 && skipped.length === 1 && /未知のページ拡張子/.test(skipped[0].reason)) {
+    ok('未知の page 拡張子は skipped として理由付きで顕在化')
+  } else bad(`未知拡張子の扱いが想定外: ${JSON.stringify({ routes, skipped })}`)
+}
+
+// ㉔ 一方で明らかな非ルート資産(page.css 等)まで ⓘ を出すとノイズで顕在化が埋もれる（負のサニティ）
+{
+  const { routes, skipped } = routesFromPageFiles(['page.css', 'noxa/page.module.css', 'page.test.tsx'])
+  if (routes.length === 0 && skipped.length === 0) ok('page.css / page.module.css / page.test.tsx は ⓘ を出さず静かに無視(負のサニティ)')
+  else bad(`非ルート資産の扱いが想定外: ${JSON.stringify({ routes, skipped })}`)
+}
+
+console.log('\n[selftest-check-links] リンク由来パスの正規化(normalizeRoutePath)')
+
+// ㉕ trailingSlash: true 環境ではリンク由来を揃えないと同一ルートを2回叩き、
+//   「うち無リンクM」もリンク済みルートを無リンクと誤報する。
+{
+  const link = ['/', '/noxa', '/stamps/'].map(normalizeRoutePath)
+  const routes = ['/', '/noxa/', '/stamps/', '/workspaces/']
+  const internal = [...new Set([...link, ...routes])]
+  const unlinked = routes.filter((r) => !link.includes(r))
+  if (internal.length === 4 && !internal.includes('/noxa') &&
+      unlinked.length === 1 && unlinked[0] === '/workspaces/') {
+    ok('末尾スラッシュ無しの href を正規化し重複ターゲットと無リンク誤報を防ぐ')
+  } else bad(`正規化が想定外: internal=${JSON.stringify(internal)} unlinked=${JSON.stringify(unlinked)}`)
+}
+
+console.log('\n[selftest-check-links] canonical/og:url の自己参照ずれ(findSelfUrlMismatches)')
+
+const ORIGIN = 'https://egshugy.com'
+
+// ㉖ 自分のルートを正しく指していれば何も出ない。末尾スラッシュの揺れは正規化して吸収する。
+{
+  const { mismatches, declarations } = findSelfUrlMismatches([
+    { file: 'noxa/layout.tsx', src: `canonical: "${ORIGIN}/noxa/", url: "${ORIGIN}/noxa"` },
+    { file: 'layout.tsx', src: `metadataBase: new URL('${ORIGIN}')` },
+  ], ORIGIN)
+  if (mismatches.length === 0 && declarations === 2) ok('自ルートを指す canonical/og:url は正常(origin だけの metadataBase は宣言に数えない)')
+  else bad(`正常な宣言を誤検知: ${JSON.stringify({ mismatches, declarations })}`)
+}
+
+// ㉗ 別ルートを指す宣言＝HTTP は 200 なので死活監視をすり抜ける本命のケース。
+//   検索エンジンに正規URLを誤申告し、SNS では別ページの共有カードが出続ける。
+{
+  const { mismatches } = findSelfUrlMismatches([
+    { file: 'noxa/layout.tsx', src: `canonical: "${ORIGIN}/"` },
+  ], ORIGIN)
+  if (mismatches.length === 1 && mismatches[0].declared === '/' && mismatches[0].expected === '/noxa/') {
+    ok('別ルートを指す canonical を検知(200 が返るため HTTP 検査では絶対に落ちない)')
+  } else bad(`自己URLずれの検知が想定外: ${JSON.stringify(mismatches)}`)
+}
+
+// ㉘ URL を静的に決められないルート配下は突合しない（誤検知させない・負のサニティ）
+{
+  const { mismatches } = findSelfUrlMismatches([
+    { file: 'blog/[slug]/layout.tsx', src: `canonical: "${ORIGIN}/blog/hello/"` },
+  ], ORIGIN)
+  if (mismatches.length === 0) ok('動的セグメント配下は自己URL突合の対象外(負のサニティ)')
+  else bad(`動的ルートで誤検知: ${JSON.stringify(mismatches)}`)
+}
+
+// ㉙ **false-red の回帰(PM 再レビューで実測した誤検知)**: 絶対URLの OG 画像と、別ルートを指す
+//   正当な絶対リンクは自己参照宣言ではない。当初実装はファイル中の自サイト絶対URLを無条件に
+//   突合しており、この2つで死活監視が HTTP 検査の前に exit 1 で丸ごと落ちていた。
+{
+  const { mismatches, declarations } = findSelfUrlMismatches([
+    { file: 'layout.tsx', src: `openGraph: { images: ['${ORIGIN}/og-image.png'] }` },
+    { file: 'noxa/page.tsx', src: `<a href="${ORIGIN}/">トップへ戻る</a>` },
+  ], ORIGIN)
+  if (mismatches.length === 0 && declarations === 0) ok('絶対URLの OG 画像・別ルートへの正当な絶対リンクを誤検知しない(false-red 回帰)')
+  else bad(`宣言でないURLを誤検知: ${JSON.stringify({ mismatches, declarations })}`)
+}
+
+// ㉚ metadata が効くのは page/layout。宣言と同じ書き方でもそれ以外のファイルは突合しない
+//   (app/lib/meta.ts のように複数ルート分の canonical を組み立てる置き場を誤検知させない)。
+{
+  const { mismatches, declarations } = findSelfUrlMismatches([
+    { file: 'lib/meta.ts', src: `canonical: "${ORIGIN}/noxa/"` },
+  ], ORIGIN)
+  if (mismatches.length === 0 && declarations === 0) ok('page/layout 以外のファイルは自己URL突合の対象外(負のサニティ)')
+  else bad(`page/layout 以外で誤検知: ${JSON.stringify({ mismatches, declarations })}`)
+}
+
+// ㉛ 本物の app/ に自己URLずれが無いこと＋宣言が実在すること（実データの固定・本体 floor の裏付け）
+{
+  const entries = walkRel(path.join(__dirname, '..', 'app'))
+    .filter((f) => /\.tsx?$/.test(f))
+    .map((f) => ({ file: f, src: fs.readFileSync(path.join(__dirname, '..', 'app', f), 'utf8') }))
+  const { mismatches, declarations } = findSelfUrlMismatches(entries, ORIGIN)
+  if (mismatches.length === 0 && declarations === 2) ok(`実 app/ の自己URL宣言(${declarations}件)に矛盾なし`)
+  else bad(`実 app/ の自己URL突合が想定外: ${JSON.stringify({ mismatches, declarations })}`)
+}
+
+// ㉜ origin の単一の出所(metadataBase)を読めること／読めなければ null（本体が致命にする条件）
+{
+  const good = extractMetadataBaseOrigin(`  metadataBase: new URL('https://egshugy.com'),`)
+  const withSlash = extractMetadataBaseOrigin(`metadataBase: new URL("https://egshugy.com/")`)
+  const gone = extractMetadataBaseOrigin(`export const metadata = { title: 'x' }`)
+  if (good === 'https://egshugy.com' && withSlash === 'https://egshugy.com' && gone === null) {
+    ok('metadataBase から origin を抽出(末尾スラッシュ吸収)・不在なら null(本体の floor 条件)')
+  } else bad(`metadataBase 抽出が想定外: ${JSON.stringify({ good, withSlash, gone })}`)
+}
+
 console.log('\n[selftest-check-links] 配線(check-links --list が実ルートを監視対象に載せているか)')
 
-// ㉑ 本物の app/ を歩いた結果が targets に合流しているところまで固定する。
+// ㉝ 本物の app/ を歩いた結果が targets に合流しているところまで固定する。
 //   抽出層が正しくても本体で合流し損ねていれば監視は増えないまま「✓」で通る。
 //   とくに /workspaces/ は **どこからもリンクされないことが仕様**の救済ルート(yorulog の
 //   Service Worker が握った古いキャッシュから来た人をトップへ逃がす)で、リンク由来の抽出
 //   だけでは永久に無監視になる。ここが落ちたら Day97 の退行。
+//   PM(Day97): 期待値の作り方を**実ツリーの再帰走査**へ改めた。朝の実装は app/ 直下1階層の
+//   ディレクトリしか見ておらず、入れ子ルート(app/a/b/page.tsx)が配線から落ちても緑のまま＝
+//   本日封鎖した「母集団の決め方が狭くて取りこぼす」穴を、テストの期待値側で作っていた。
+//   期待値を routesFromPageFiles に委ねてよいのは、同関数の変換規則を上で独立に固定して
+//   いるため。このテストが見るのは「その結果が本体の targets へ合流しているか」の配線。
+function walkRel(dir, prefix = '') {
+  let out = []
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const rel = prefix ? `${prefix}/${e.name}` : e.name
+    if (e.isDirectory()) out = out.concat(walkRel(path.join(dir, e.name), rel))
+    else out.push(rel)
+  }
+  return out
+}
 {
   const r = spawnSync(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--list'], { encoding: 'utf8' })
   const internal = r.stdout.split('\n').filter((l) => l.split('\t')[1] === '内部').map((l) => l.split('\t')[2])
-  const pageDirs = fs.readdirSync(path.join(__dirname, '..', 'app'), { withFileTypes: true })
-    .filter((e) => e.isDirectory() && fs.existsSync(path.join(__dirname, '..', 'app', e.name, 'page.tsx')))
-    .map((e) => `/${e.name}/`)
-  const missing = ['/', ...pageDirs].filter((p) => !internal.some((u) => u.endsWith(p)))
-  if (r.status === 0 && missing.length === 0 && internal.some((u) => u.endsWith('/workspaces/'))) {
-    ok(`app の実ルート全${pageDirs.length + 1}件が監視対象に載っている(無リンクの /workspaces/ を含む)`)
-  } else bad(`実ルートが監視対象から漏れている: missing=${JSON.stringify(missing)} status=${r.status}`)
+  const { routes: expected } = routesFromPageFiles(walkRel(path.join(__dirname, '..', 'app')))
+  const missing = expected.filter((p) => !internal.some((u) => u.endsWith(p)))
+  if (r.status === 0 && expected.length > 0 && missing.length === 0 && internal.some((u) => u.endsWith('/workspaces/'))) {
+    ok(`app の実ルート全${expected.length}件が監視対象に載っている(再帰走査・無リンクの /workspaces/ を含む)`)
+  } else bad(`実ルートが監視対象から漏れている: expected=${JSON.stringify(expected)} missing=${JSON.stringify(missing)} status=${r.status}`)
+}
+
+// ㉞ 監視対象に同一URLの重複が無い(正規化の配線)。重複は無害に見えて件数表示を膨らませ、
+//   「内部N件」を実態より多く見せる＝監視の網が広がったように誤読させる。
+{
+  const r = spawnSync(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--list'], { encoding: 'utf8' })
+  const urls = r.stdout.split('\n').filter((l) => l.includes('\t')).map((l) => l.split('\t')[2])
+  const dup = urls.filter((u, i) => urls.indexOf(u) !== i)
+  if (dup.length === 0) ok('監視対象URLに重複が無い(リンク由来とルート由来の統合が正規化されている)')
+  else bad(`監視対象URLが重複している: ${JSON.stringify([...new Set(dup)])}`)
+}
+
+// ㉛㉜ 自己URLずれ→exit 1 の配線。LINKS_SELFURL_DIR の非破壊 override で正本は触らない
+//   (Day94 の UPTIME_APP_DIR と同じ作法)。--list は HTTP を出さないので、ずれの判定が
+//   末尾のまとめ判定に置かれていると exit 0 で素通りする＝即時致命であることまで固定する。
+{
+  const fx = path.join(os.tmpdir(), 'selftest-check-links-selfurl')
+  const run = (canonical) => {
+    fs.rmSync(fx, { recursive: true, force: true })
+    fs.mkdirSync(path.join(fx, 'noxa'), { recursive: true })
+    fs.writeFileSync(path.join(fx, 'layout.tsx'), `export const metadata = { metadataBase: new URL('https://egshugy.com') }\n`)
+    fs.writeFileSync(path.join(fx, 'noxa', 'layout.tsx'), `export const metadata = { alternates: { canonical: "${canonical}" } }\n`)
+    const r = spawnSync(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--list'],
+      { encoding: 'utf8', env: { ...process.env, LINKS_SELFURL_DIR: fx } })
+    fs.rmSync(fx, { recursive: true, force: true })
+    return r
+  }
+  const bad1 = run('https://egshugy.com/')
+  if (bad1.status === 1 && /自己参照ずれ/.test(bad1.stdout)) ok('別ルートを指す canonical で check-links が即座に exit 1(--list でも素通りしない)')
+  else bad(`自己URLずれの配線が想定外: status=${bad1.status}`)
+
+  const good1 = run('https://egshugy.com/noxa/')
+  if (good1.status === 0 && !/自己参照ずれ/.test(good1.stdout)) ok('自ルートを指す canonical では素通り(負のサニティ)')
+  else bad(`正常な canonical で落ちた: status=${good1.status}`)
 }
 
 console.log(`\n[selftest-check-links] 結果: pass=${pass} fail=${fail}`)

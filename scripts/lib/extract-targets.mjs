@@ -69,9 +69,33 @@ export function extractLocalAssetRefs(src) {
 // trailingSlash: true 前提なので末尾スラッシュ付き。
 // URL を静的に決められないもの(動的セグメント・パラレルルート)は routes に混ぜず skipped に
 // 分けて返す — 黙って捨てると「監視できていない」こと自体が見えなくなるため。
-const PAGE_FILE_RE = /^page\.(?:tsx|ts|jsx|js)$/
+// PM(Day97): ページ拡張子は Next 既定の pageExtensions（js/jsx/ts/tsx）に加え、mdx 有効時の
+// md/mdx も実際にルートを生む。朝の実装は tsx/ts/jsx/js だけを見ており、`app/blog/page.mdx` を
+// **routes にも skipped にも載せず黙って捨てていた** — つまり本日封鎖したはずの
+// 「監視対象に入らないルート」を、より狭い形で自分で作り直していた（Day96 の教訓
+// 「skip の理由を区別できない実装は false-green を作る」の直系）。md/mdx を正式に routes へ
+// 載せ、なお未知の単一拡張子(`page.<未知>`)は**理由付きで skipped に顕在化**する。
+// `page.css` 等の明らかな非ルート資産だけは従来どおり静かに無視する(ⓘ ノイズを出さない)。
+const PAGE_FILE_RE = /^page\.(?:tsx|ts|jsx|js|mdx|md)$/
+const PAGE_LIKE_RE = /^page\.([A-Za-z0-9]+)$/
+const NON_ROUTE_EXT = /^(?:css|scss|sass|less|styl|json|txt|map|snap)$/i
 const ROUTE_GROUP_RE = /^\(.*\)$/
 const DYNAMIC_SEG_RE = /^\[.*\]$/
+
+// ディレクトリセグメント列(app/ 起点) → 配信URL。静的に決められない場合は理由を返す。
+// `silent` はプライベートフォルダのように「ルーティングされないのが正しい」ケースで、
+// 監視できていない旨を報告する必要が無いもの。
+function routeFromSegments(parts) {
+  const segs = []
+  for (const s of parts) {
+    if (ROUTE_GROUP_RE.test(s)) continue // ルートグループは URL に出ない
+    if (s.startsWith('_')) return { skip: 'プライベートフォルダ(ルーティングされない)', silent: true }
+    if (s.startsWith('@')) return { skip: 'パラレルルート(単独URLを持たない)' }
+    if (DYNAMIC_SEG_RE.test(s)) return { skip: '動的セグメント(URLが実引数依存)' }
+    segs.push(s)
+  }
+  return { route: segs.length ? `/${segs.join('/')}/` : '/' }
+}
 
 export function routesFromPageFiles(files) {
   const routes = new Set()
@@ -79,20 +103,74 @@ export function routesFromPageFiles(files) {
   for (const file of files) {
     const parts = file.split('/')
     const base = parts.pop()
-    if (!PAGE_FILE_RE.test(base)) continue
-    // `_foo` はプライベートフォルダでルーティングされない(Next.js の規約)
-    if (parts.some((s) => s.startsWith('_'))) continue
-
-    const segs = []
-    let skip = null
-    for (const s of parts) {
-      if (ROUTE_GROUP_RE.test(s)) continue // ルートグループは URL に出ない
-      if (s.startsWith('@')) { skip = 'パラレルルート(単独URLを持たない)'; break }
-      if (DYNAMIC_SEG_RE.test(s)) { skip = '動的セグメント(URLが実引数依存)'; break }
-      segs.push(s)
+    if (!PAGE_FILE_RE.test(base)) {
+      const m = PAGE_LIKE_RE.exec(base)
+      if (m && !NON_ROUTE_EXT.test(m[1])) {
+        skipped.push({ file, reason: `未知のページ拡張子(.${m[1]})＝ルート化規則が追いついていない` })
+      }
+      continue
     }
-    if (skip) skipped.push({ file, reason: skip })
-    else routes.add(segs.length ? `/${segs.join('/')}/` : '/')
+    const r = routeFromSegments(parts)
+    if (r.skip) { if (!r.silent) skipped.push({ file, reason: r.skip }) }
+    else routes.add(r.route)
   }
   return { routes: [...routes], skipped }
+}
+
+// --- canonical / og:url の自己参照ずれ検知(PM Day97) ---
+// metadata の canonical・openGraph.url は**自サイトの絶対URL**なので、死活監視から見ると
+// ただの外部リンクで、200 を返す限り何も起きない。しかし「/noxa/ の canonical が / を
+// 指している」ような取り違えは**別ルートでも 200 なので永久に検知されない**まま、
+// 検索エンジンには正規URLの誤申告、SNS には別ページの共有カードとして出続ける。
+// これは今日封鎖した穴と同じ構図＝「実ルートを母集団にして突合しないと分からない」。
+// metadata を宣言するファイル(page/layout)の canonical・og:url のパスは、そのファイル自身の
+// ルートと一致していなければならない。
+// 自サイト origin の単一の出所は app/layout.tsx の metadataBase。ここを二重管理すると
+// 「片方だけ変えて突合が黙って無効になる」ので、必ずソースから読む。読めなければ null を
+// 返し、呼び出し側が致命として落とす(規約変更で突合が無言化するのを防ぐ)。
+export function extractMetadataBaseOrigin(src) {
+  const m = src.match(/metadataBase:\s*new URL\(\s*['"`](https?:\/\/[^'"`]+?)\/?['"`]\s*\)/)
+  return m ? m[1] : null
+}
+
+// PM 再レビュー(Day97): 当初この関数は「ファイル中に現れる自サイト絶対URL」を無条件に
+// そのファイルのルートと突合していた。これは名前(canonical/og:url)より遥かに広く、
+// **正当な書き方を致命(exit 1)で殺す false-red** になる。実測で確認した誤検知2種:
+//   ① `openGraph: { images: ['<origin>/og-image.png'] }` ＝ 絶対URLの OG 画像(ごく普通の書き方)
+//   ② `<a href="<origin>/">トップへ戻る</a>` ＝ 別ルートを指す正当な絶対リンク
+// しかも判定は HTTP 検査より前で即 exit 1 のため、**この誤検知1件で死活監視が丸ごと落ちる**
+// (Day91 で塞いだ「phantom を hard 監視して cron が red」と同クラスの逆戻り)。
+// よって突合対象を「宣言そのもの」に絞る＝キー `canonical` / `url`(alternates.canonical と
+// openGraph.url / twitter の url)の値だけを見る。画像・任意の href は母集団に入れない。
+// 併せて metadata が実際に効くファイル(page.* / layout.*)だけを対象にする。
+// 絞った分「記法変更で突合が黙って無効になる」危険が増えるので、宣言件数を返して
+// 呼び出し側が0件を致命にできるようにする(Day91/94/96 と同じ floor)。
+const SELF_URL_FILE_RE = /^(?:page|layout)\.(?:tsx|ts|jsx|js|mdx|md)$/
+export function findSelfUrlMismatches(entries, origin) {
+  const esc = origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const re = new RegExp(`["'\`]?\\b(?:canonical|url)["'\`]?\\s*:\\s*["'\`]${esc}(/[^"'\`]*)?["'\`]`, 'g')
+  const mismatches = []
+  let declarations = 0
+  for (const { file, src } of entries) {
+    const parts = file.split('/')
+    if (!SELF_URL_FILE_RE.test(parts.pop())) continue // metadata が効くのは page/layout だけ
+    const r = routeFromSegments(parts)
+    if (r.skip) continue // URL を静的に決められないルートは突合しない
+    for (const m of src.matchAll(re)) {
+      const declared = m[1]
+      if (declared === undefined) continue // origin だけ(metadataBase)は自己参照ではない
+      declarations++
+      if (normalizeRoutePath(declared) !== r.route) mismatches.push({ file, declared, expected: r.route })
+    }
+  }
+  return { mismatches, declarations }
+}
+
+// リンク由来の内部パスをルート由来(末尾スラッシュ付き)と同じ表記に揃える。
+// PM(Day97): next.config の `trailingSlash: true` により `/noxa` と `/noxa/` は同じルートだが、
+// 朝の実装は両者を素の Set で統合していたため、JSX に `href="/noxa"` と書かれた瞬間に
+// ①同一ルートを2回叩き ②「うち無リンクM」件数が実態より多く出る（リンク済みのルートを
+// 無リンクと誤報する）という表示の嘘が生まれる。突合の前に必ずここを通す。
+export function normalizeRoutePath(p) {
+  return p.endsWith('/') ? p : `${p}/`
 }

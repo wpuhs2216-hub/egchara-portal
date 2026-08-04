@@ -12,7 +12,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fetchWithRetry } from './fetch-with-retry.mjs'
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles } from './lib/extract-targets.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin } from './lib/extract-targets.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -111,7 +111,10 @@ if (appRoutes.length === 0) {
   console.log('[check-links] ✗ 致命: 実ルート抽出が0件（Next のルート規約変更で監視が無言化した可能性）。scripts/lib/extract-targets.mjs の routesFromPageFiles を確認すること。')
   process.exit(1)
 }
-const linkInternal = [...new Set([...featuredInternal, ...experimentInternal, ...pageNavInternal])]
+// リンク由来はルート由来と表記を揃えてから統合する(PM Day97)。trailingSlash: true 環境で
+// `href="/noxa"` と `/noxa/` は同じルートなので、素の Set 統合だと同一ルートを2回叩き、
+// 「うち無リンクM」もリンク済みルートを無リンクと誤報する。
+const linkInternal = [...new Set([...featuredInternal, ...experimentInternal, ...pageNavInternal].map(normalizeRoutePath))]
 const internal = [...new Set([...linkInternal, ...appRoutes])]
 const unlinkedRoutes = appRoutes.filter((r) => !linkInternal.includes(r))
 for (const s of skippedRoutes) console.log(`  ⓘ 静的検査対象外 [実ルート] app/${s.file}（${s.reason}）`)
@@ -207,15 +210,63 @@ const localImageRefs = scanLocalAssetRefs()
 const localMissing = localImageRefs.filter((p) => !fs.existsSync(path.join(ROOT, 'public', p)))
 for (const p of localMissing) console.log(`  ✗ MISSING  [ローカル静的] public${p} が存在しない(メタ/JSX が参照・共有カード等が404になる)`)
 
+// --- canonical / og:url の自己参照ずれ(PM Day97) ---
+// 自サイトの絶対URL宣言は死活監視から見ればただの外部リンクで、**別ルートを指していても
+// 200 が返るので永久に検知されない**。検索エンジンへの正規URL誤申告・SNS で別ページの
+// 共有カードが出る、という実害だけが静かに残る。実ルートを母集団にして突合する。
+// origin は app/layout.tsx の metadataBase を単一の出所とする（二重管理を作らない）。
+// LINKS_SELFURL_DIR は selftest がフィクスチャを見せるための非破壊 override(Day94 の
+// UPTIME_APP_DIR と同じ作法)。正本を一時改竄せずに「ずれ→exit 1」の配線まで固定できる。
+const SELFURL_DIR = process.env.LINKS_SELFURL_DIR ? path.resolve(process.env.LINKS_SELFURL_DIR) : path.join(ROOT, 'app')
+const selfOrigin = extractMetadataBaseOrigin(fs.readFileSync(path.join(SELFURL_DIR, 'layout.tsx'), 'utf8'))
+if (!selfOrigin) {
+  console.log('  ✗ 抽出失敗 [自己URL] app/layout.tsx から metadataBase を読めない')
+  console.log('[check-links] ✗ 致命: metadataBase 抽出が0件（記法変更で canonical/og:url の突合が無言化した可能性）。')
+  process.exit(1)
+}
+const selfUrlEntries = collectPageFiles(SELFURL_DIR)
+  .filter((f) => /\.tsx?$/.test(f))
+  .map((f) => ({ file: f, src: fs.readFileSync(path.join(SELFURL_DIR, f), 'utf8') }))
+const { mismatches: selfUrlMismatches, declarations: selfUrlDeclarations } = findSelfUrlMismatches(selfUrlEntries, selfOrigin)
+// 宣言0件の floor(Day91 と同型)。突合対象を canonical/url のキーに絞った分、記法変更
+// (例: canonical を new URL(...) で組む)で母集団が黙って空になり、「✓ 整合」と出たまま
+// 突合が消える経路が生まれる。宣言が1件も無いこと自体を致命として顕在化する。
+if (selfUrlDeclarations === 0) {
+  console.log('  ✗ 抽出失敗 [自己URL] app/ の page/layout から canonical・og:url の宣言を1件も抽出できない')
+  console.log('[check-links] ✗ 致命: 自己URL宣言が0件（記法変更で突合が無言化した可能性）。scripts/lib/extract-targets.mjs の findSelfUrlMismatches を確認すること。')
+  process.exit(1)
+}
+// ずれはネットワークを見るまでもなく確定する静的な欠陥なので即座に落とす。
+// 末尾までまとめて判定すると --list（HTTP を出さない口）が exit 0 で素通しにしてしまう。
+if (selfUrlMismatches.length > 0) {
+  for (const m of selfUrlMismatches) {
+    console.log(`  ✗ ずれ  [自己URL] app/${m.file} が ${m.declared} を宣言(このファイルのルートは ${m.expected})＝canonical/og:url の誤申告`)
+  }
+  console.log(`[check-links] ✗ 致命: canonical/og:url の自己参照ずれ ${selfUrlMismatches.length}件（別ルートでも 200 が返るため HTTP 検査では検知できない・SEO の正規URL誤申告と共有カードの取り違えになる）。`)
+  process.exit(1)
+}
+
 const STRICT = process.argv.includes('--strict')
-const targets = [
+const rawTargets = [
   ...internal.map((p) => ({ url: BASE + p, cat: '内部', soft: false })),
   ...charImages.map((p) => ({ url: BASE + p, cat: 'キャラ画像', soft: false })),
   ...charPages.map((p) => ({ url: BASE + p, cat: 'キャラ型頁', soft: true })),
   ...externals.map((u) => ({ url: u, cat: '外部', soft: false })),
 ]
+// 同一URLの重複排除(PM Day97)。metadata の canonical/og:url は自サイトの絶対URLなので
+// 「外部」抽出にも載り、内部ターゲットと同じURLを2回叩いていた(実測 /noxa/)。情報量は
+// 増えないのに件数だけが膨らみ、監視の網が実態より広いように読めてしまう。
+// soft と hard が同一URLで競合したら hard(厳しい方)を残す。
+const byUrl = new Map()
+for (const t of rawTargets) {
+  const prev = byUrl.get(t.url)
+  if (!prev) byUrl.set(t.url, t)
+  else if (prev.soft && !t.soft) byUrl.set(t.url, t)
+}
+const targets = [...byUrl.values()]
+const dupCount = rawTargets.length - targets.length
 
-console.log(`[check-links] base=${BASE} 内部${internal.length}(featured-apps=${featuredLive ? 'live' : 'dead:除外'} / 実ルート${appRoutes.length}・うち無リンク${unlinkedRoutes.length}) + キャラ画像${charImages.length} + キャラ型頁${charPages.length}(soft) + 外部${externals.length} = ${targets.length}件${STRICT ? ' [strict]' : ''}`)
+console.log(`[check-links] base=${BASE} 内部${internal.length}(featured-apps=${featuredLive ? 'live' : 'dead:除外'} / 実ルート${appRoutes.length}・うち無リンク${unlinkedRoutes.length}) + キャラ画像${charImages.length} + キャラ型頁${charPages.length}(soft) + 外部${externals.length} = ${targets.length}件${dupCount ? `(重複${dupCount}件を排除)` : ''}${STRICT ? ' [strict]' : ''}`)
 
 // --list: 実リクエストを出さずに監視対象だけを吐いて終わる(Day97)。
 // selftest から「何が監視対象になっているか」をネットワーク無しで固定できるようにするための口。
@@ -238,10 +289,10 @@ if (softBad.length > 0) {
 
 const fatal = hardBad.length > 0 || localMissing.length > 0 || (STRICT && softBad.length > 0)
 if (!fatal && hardBad.length === 0 && softBad.length === 0) {
-  console.log(`[check-links] ✓ 全${results.length}件 OK / ローカル静的アセット ${localImageRefs.length}件実在`)
+  console.log(`[check-links] ✓ 全${results.length}件 OK / ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合`)
   process.exit(0)
 } else if (!fatal) {
-  console.log(`[check-links] ✓ portal自前 ${results.length - softBad.length}/${results.length - softBad.length} 件 OK（soft ${softBad.length}件は警告のみ）/ ローカル静的アセット ${localImageRefs.length}件実在`)
+  console.log(`[check-links] ✓ portal自前 ${results.length - softBad.length}/${results.length - softBad.length} 件 OK（soft ${softBad.length}件は警告のみ）/ ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合`)
   process.exit(0)
 } else {
   console.log(`[check-links] ✗ 致命 ${hardBad.length}件${localMissing.length ? ` + ローカル静的欠落 ${localMissing.length}件` : ''}${STRICT ? ` + soft ${softBad.length}件` : ''} / 全${results.length}件`)
