@@ -55,3 +55,44 @@ const LOCAL_ASSET_RE = /["'](\/[A-Za-z0-9_-]+\.(?:png|jpg|jpeg|webp|svg|gif|ico|
 export function extractLocalAssetRefs(src) {
   return [...new Set([...src.matchAll(LOCAL_ASSET_RE)].map((m) => m[1]))]
 }
+
+// --- 実ルート列挙(Day97) ---
+// これまで check-links の内部ターゲットは「どこかの href から辿れるパス」だけで組み立てて
+// いた。つまり**リンクを監視していてルートを監視していない**。どこからもリンクされない
+// ルートは静的エクスポートされ本番で配信されているのに、消えても壊れても「✓ 全件OK」の
+// ままになる(Day91/94/96 と同じ false-green の、監視対象の選定層での現れ)。
+// 実例: `/workspaces/` は yorulog の Service Worker が握った古いキャッシュから来た人を
+// トップへ逃がすための救済ルートで、**リンクされないことが仕様**。ゆえにこの穴の直撃を
+// 受けており、消えても誰も気づけないまま「SW に汚染された端末だけが永久に 404」になる。
+//
+// page ファイルの相対パス一覧(app/ 起点)から、静的エクスポートで実際に生える URL を出す。
+// trailingSlash: true 前提なので末尾スラッシュ付き。
+// URL を静的に決められないもの(動的セグメント・パラレルルート)は routes に混ぜず skipped に
+// 分けて返す — 黙って捨てると「監視できていない」こと自体が見えなくなるため。
+const PAGE_FILE_RE = /^page\.(?:tsx|ts|jsx|js)$/
+const ROUTE_GROUP_RE = /^\(.*\)$/
+const DYNAMIC_SEG_RE = /^\[.*\]$/
+
+export function routesFromPageFiles(files) {
+  const routes = new Set()
+  const skipped = []
+  for (const file of files) {
+    const parts = file.split('/')
+    const base = parts.pop()
+    if (!PAGE_FILE_RE.test(base)) continue
+    // `_foo` はプライベートフォルダでルーティングされない(Next.js の規約)
+    if (parts.some((s) => s.startsWith('_'))) continue
+
+    const segs = []
+    let skip = null
+    for (const s of parts) {
+      if (ROUTE_GROUP_RE.test(s)) continue // ルートグループは URL に出ない
+      if (s.startsWith('@')) { skip = 'パラレルルート(単独URLを持たない)'; break }
+      if (DYNAMIC_SEG_RE.test(s)) { skip = '動的セグメント(URLが実引数依存)'; break }
+      segs.push(s)
+    }
+    if (skip) skipped.push({ file, reason: skip })
+    else routes.add(segs.length ? `/${segs.join('/')}/` : '/')
+  }
+  return { routes: [...routes], skipped }
+}

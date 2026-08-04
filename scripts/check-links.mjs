@@ -1,15 +1,18 @@
-// リンク死活チェッカー — featured-apps の内部リンク / 主要外部リンク / 32キャラ画像を実リクエストで確認する。
+// リンク死活チェッカー — 内部リンク / app の実ルート / 主要外部リンク / 32キャラ画像を実リクエストで確認する。
+// 内部ターゲットは「リンク由来(href)」と「ルート由来(app/**/page.tsx)」の和集合。後者が無いと
+// どこからもリンクされない救済ルート(/workspaces/ 等)が永久に無監視になる(Day97)。
 // 使い方:
 //   node scripts/check-links.mjs             # 本番 (https://egshugy.com) に対して確認
 //   node scripts/check-links.mjs --base http://192.168.0.77   # オリジン直叩き
 //   node scripts/check-links.mjs --strict    # egtype依存の型ページ(soft)404も致命扱い
+//   node scripts/check-links.mjs --list      # 実リクエストを出さず監視対象一覧だけ出す
 // 終了コード: portal自前リンク失敗=1 / soft(egtype型ページ)失敗は既定で警告のみ(0)・--strictで1
 //   (egtype と portal はセットでデプロイ。egtype 未デプロイ中の新16体型ページ404は想定内)
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fetchWithRetry } from './fetch-with-retry.mjs'
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs } from './lib/extract-targets.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles } from './lib/extract-targets.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -82,7 +85,36 @@ function collectAppInternal(dir) {
   return out
 }
 const pageNavInternal = collectAppInternal(path.join(ROOT, 'app'))
-const internal = [...new Set([...featuredInternal, ...experimentInternal, ...pageNavInternal])]
+
+// 2.7) app/**/page.tsx から「実際に配信されるルート」そのものを列挙する(Day97)。
+//   2)〜2.6) はいずれも **リンク**(href / 配列の href フィールド)を辿る抽出で、どこからも
+//   リンクされないルートは監視対象に一度も入らない。実例が `/workspaces/` で、これは
+//   yorulog の Service Worker が握った古いキャッシュから来た人をトップへ逃がす救済ルート＝
+//   **リンクされないことが仕様**。本番で 200 を返しているのに監視は素通りで、消えても
+//   check-links は「✓ 全件OK」と出る(= 監視対象の選定層での false-green)。
+//   リンク由来の集合と Set で統合するので、リンクもあるルート(/・/noxa/・/stamps/)は重複しない。
+function collectPageFiles(dir, prefix = '') {
+  let out = []
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const rel = prefix ? `${prefix}/${e.name}` : e.name
+    if (e.isDirectory()) out = out.concat(collectPageFiles(path.join(dir, e.name), rel))
+    else out.push(rel)
+  }
+  return out
+}
+const { routes: appRoutes, skipped: skippedRoutes } = routesFromPageFiles(collectPageFiles(path.join(ROOT, 'app')))
+// 抽出0件の floor(Day91 と同型): app/ に page が1つも無いことは静的ポータルではありえず、
+// 0件は「ルート規約の変更でこの層が黙って死んだ」ことを意味する。そのまま進むと
+// リンク由来だけの旧挙動へ静かに退化する＝この修正自体が無言で無効化されるため即座に落とす。
+if (appRoutes.length === 0) {
+  console.log('  ✗ 抽出失敗 [実ルート] app/ から page.* を1件も抽出できない')
+  console.log('[check-links] ✗ 致命: 実ルート抽出が0件（Next のルート規約変更で監視が無言化した可能性）。scripts/lib/extract-targets.mjs の routesFromPageFiles を確認すること。')
+  process.exit(1)
+}
+const linkInternal = [...new Set([...featuredInternal, ...experimentInternal, ...pageNavInternal])]
+const internal = [...new Set([...linkInternal, ...appRoutes])]
+const unlinkedRoutes = appRoutes.filter((r) => !linkInternal.includes(r))
+for (const s of skippedRoutes) console.log(`  ⓘ 静的検査対象外 [実ルート] app/${s.file}（${s.reason}）`)
 const charIds = extractCharIds(page)
 // 抽出0件の floor(Day91): 抽出は page.tsx の記法に依存するため、整形や ID 規則の変更で
 // 黙って0件になりうる。そのまま進むと「キャラ画像0 + キャラ型頁0 件を検査して✓全件OK」と
@@ -183,7 +215,16 @@ const targets = [
   ...externals.map((u) => ({ url: u, cat: '外部', soft: false })),
 ]
 
-console.log(`[check-links] base=${BASE} 内部${internal.length}(featured-apps=${featuredLive ? 'live' : 'dead:除外'}) + キャラ画像${charImages.length} + キャラ型頁${charPages.length}(soft) + 外部${externals.length} = ${targets.length}件${STRICT ? ' [strict]' : ''}`)
+console.log(`[check-links] base=${BASE} 内部${internal.length}(featured-apps=${featuredLive ? 'live' : 'dead:除外'} / 実ルート${appRoutes.length}・うち無リンク${unlinkedRoutes.length}) + キャラ画像${charImages.length} + キャラ型頁${charPages.length}(soft) + 外部${externals.length} = ${targets.length}件${STRICT ? ' [strict]' : ''}`)
+
+// --list: 実リクエストを出さずに監視対象だけを吐いて終わる(Day97)。
+// selftest から「何が監視対象になっているか」をネットワーク無しで固定できるようにするための口。
+// 抽出層(lib)の純関数テストだけでは、抽出できていても本体で targets に合流し損ねていれば
+// 監視は増えないまま通ってしまう＝配線までを固定しないと false-green は塞げない。
+if (process.argv.includes('--list')) {
+  for (const t of targets) console.log(`${t.soft ? 'soft' : 'hard'}\t${t.cat}\t${t.url}`)
+  process.exit(0)
+}
 const results = await Promise.all(targets.map(async (t) => ({ ...t, ...(await check(t.url)) })))
 const hardBad = results.filter((r) => !r.ok && !r.soft)
 const softBad = results.filter((r) => !r.ok && r.soft)
