@@ -25,7 +25,7 @@ import { fetchWithRetry, isTransientStatus } from './fetch-with-retry.mjs'
 // ための逃がし弁で、従来はカテゴリごとの手書きリテラルだったため実際の配信主体とずれていた
 // (同じ /egtype/ 依存で画像は hard・型ページは soft)。URL 由来の述語に変えた分、今度は
 // 「接頭辞を広げれば自前のリンク切れまで警告のみにできる」経路が生まれるので、そこも押さえる。
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl } from './lib/extract-targets.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl } from './lib/extract-targets.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -440,10 +440,19 @@ function walkRel(dir, prefix = '') {
     ok(`egtype 配信の全${egtypeRows.length}件が soft・portal 自前に soft が無い(致命度がURL由来で一貫)`)
   } else bad(`致命度の配線が想定外: hardEgtype=${hardEgtype.length} softOwn=${softOwn.length} status=${r.status}`)
 
-  // サマリの「portal自前 N」に egtype 配信を混ぜていないこと(集計の嘘の再発防止)。
-  const ownCount = rows.filter(([lv]) => lv === 'hard').length
-  if (new RegExp(`portal自前 hard ${ownCount} `).test(r.stdout)) ok(`サマリの「portal自前 hard ${ownCount}」が実際の hard 件数と一致(egtype 配信を混ぜていない)`)
-  else bad(`サマリの自前件数が実態とずれている: hard=${ownCount} / stdout=${r.stdout.split('\n')[0]}`)
+  // サマリの件数が owner 列の実内訳と3値とも一致すること(集計の嘘の再発防止)。
+  // PM Day101: 朝は hard を丸ごと「portal自前」と称し外部リンク9件を自前に混ぜていた
+  // (=朝が封鎖したはずの嘘と同型)。hard であることと portal 自前であることは別の話なので、
+  // 「portal自前」「外部」「egtype配信」の3つを別々に突合する。
+  const n = (o) => rows.filter(([, , , owner]) => owner === o).length
+  const expected = `hard: portal自前${n('portal')} + 外部${n('external')} / soft: egtype配信${n('egtype')}`
+  if (r.stdout.includes(expected)) ok(`サマリの内訳が owner 列と3値一致（${expected}）`)
+  else bad(`サマリの内訳が実態とずれている: 期待「${expected}」/ 実際「${r.stdout.split('\n')[0]}」`)
+
+  // 母集団 floor: 外部リンクが0件だと上の突合は 0===0 で通ってしまい、混同の再発を
+  // 検知できなくなる(空振り)。実データに外部が存在することまで込みで固定する。
+  if (n('external') > 0 && n('portal') > 0) ok(`突合の母集団が空でない(portal自前${n('portal')} / 外部${n('external')})`)
+  else bad(`突合が空振りしている: portal=${n('portal')} external=${n('external')}（抽出層の退化を疑うこと）`)
 }
 
 // ㊲ floor: 分類を URL 由来にした代償として、接頭辞を広げるだけで「自前のリンク切れも
@@ -466,6 +475,37 @@ function walkRel(dir, prefix = '') {
   const sane = run('/egtype/')
   if (sane.status === 0 && !/分類異常/.test(sane.stdout)) ok('既定と同じ接頭辞なら素通り(負のサニティ)')
   else bad(`正常な接頭辞で落ちた: status=${sane.status}`)
+
+  // PM Day101: 実ルート floor の母集団は app/ の4件しかなく、**実ルートでない内部リンク**
+  // (/word-wolf/ 等の稼働中ゲーム＝Day45 で実 404 を出した箇所)を飲み込む形は素通りしていた。
+  // 既定より緩い override は全ターゲットで拒否されること。
+  const game = run('/egtype/,/word-wolf/')
+  if (game.status === 1 && /格下げ.*word-wolf/.test(game.stdout)) ok('実ルートでない内部リンク(/word-wolf/)を飲み込む override も拒否する')
+  else bad(`実ルート以外を飲み込む override が素通りした: status=${game.status}`)
+
+  // 逆向き(既定より厳しくする=soft を減らす)は監視が強くなるだけなので許容する。
+  // ここを一緒に拒否すると「厳格化までできない」硬直したガードになる。
+  const strictor = run(' ')
+  if (strictor.status !== 0) bad(`厳格化方向の override で落ちた(格下げしていないのに拒否している): status=${strictor.status}`)
+  else if (!/soft: egtype配信0/.test(strictor.stdout)) bad(`厳格化 override の結果がサマリに出ていない: ${strictor.stdout.split('\n')[0]}`)
+  else ok('既定より厳しい override(soft 無し=全て hard)は許容する(負のサニティ)')
+}
+
+// ㊳ 素の origin(https://egshugy.com)とルート表記(https://egshugy.com/)が別ターゲットとして
+//   二重に監視されないこと。trailingSlash:true で両者は同じ1ページだが、metadataBase が
+//   素の origin を宣言しているため外部URL抽出が拾い、文字列が違うので PM Day97 の重複排除
+//   (文字列一致)をすり抜けて同じページを2回叩いていた(PM Day101 実測)。
+{
+  const B = 'https://egshugy.com'
+  if (canonicalizeTargetUrl(B, B) === `${B}/` && canonicalizeTargetUrl(`${B}/noxa/`, B) === `${B}/noxa/`) {
+    ok('素の origin をルート表記へ正規化する(他のURLは素通し)')
+  } else bad(`origin 正規化が想定外: ${canonicalizeTargetUrl(B, B)}`)
+
+  const r = spawnSync(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--list'], { encoding: 'utf8' })
+  const urls = r.stdout.split('\n').filter((l) => l.includes('\t')).map((l) => l.split('\t')[2])
+  const bare = urls.filter((u) => u === B)
+  if (bare.length === 0 && urls.includes(`${B}/`)) ok('監視対象に素の origin が残っておらず、ルート表記のみ1件で監視されている')
+  else bad(`素の origin が二重監視されている: bare=${bare.length} root=${urls.includes(`${B}/`)}`)
 }
 
 console.log(`\n[selftest-check-links] 結果: pass=${pass} fail=${fail}`)

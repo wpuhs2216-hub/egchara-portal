@@ -210,6 +210,18 @@ export function classifyTargetUrl(url, base, prefixes = CROSS_REPO_PREFIXES) {
   return { owner: 'portal', soft: false }
 }
 
+/**
+ * 自オリジンの「素の origin」表記(https://egshugy.com)をルート表記(https://egshugy.com/)へ揃える。
+ * next.config の `trailingSlash: true` によりポータルの正規表記は必ず末尾スラッシュ付きで、両者は
+ * 同じ1ページ。ところが `app/layout.tsx` の metadataBase が `new URL('https://egshugy.com')` と
+ * 素の origin を宣言しているため外部URL抽出がこれを拾い、内部由来の `/` とは**文字列が違うだけ**
+ * なので重複排除をすり抜けて同じページを2回叩いていた(PM Day97 の重複排除の取りこぼし・PM Day101 実測)。
+ * さらに owner 列(Day101)で見ると `cat=外部` なのに `owner=portal` という表示上の矛盾にもなっていた。
+ */
+export function canonicalizeTargetUrl(url, base) {
+  return url === base ? `${base}/` : url
+}
+
 // リンク由来の内部パスをルート由来(末尾スラッシュ付き)と同じ表記に揃える。
 // PM(Day97): next.config の `trailingSlash: true` により `/noxa` と `/noxa/` は同じルートだが、
 // 朝の実装は両者を素の Set で統合していたため、JSX に `href="/noxa"` と書かれた瞬間に

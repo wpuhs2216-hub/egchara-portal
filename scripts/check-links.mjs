@@ -14,7 +14,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fetchWithRetry } from './fetch-with-retry.mjs'
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, CROSS_REPO_PREFIXES } from './lib/extract-targets.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, CROSS_REPO_PREFIXES } from './lib/extract-targets.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -264,7 +264,13 @@ const rawTargets = [
   ...charImages.map((p) => ({ url: BASE + p, cat: 'キャラ画像' })),
   ...charPages.map((p) => ({ url: BASE + p, cat: 'キャラ型頁' })),
   ...externals.map((u) => ({ url: u, cat: '外部' })),
-].map((t) => ({ ...t, ...classify(t.url) }))
+  // 自オリジンの素の origin 表記をルート表記へ揃えてから分類する(PM Day101)。揃えないと
+  // `https://egshugy.com` と `https://egshugy.com/` が別ターゲットとして残り、同じページを
+  // 2回叩いたまま「86件」と称する＝件数の水増しになる(下の重複排除は文字列一致のため素通り)。
+].map((t) => {
+  const url = canonicalizeTargetUrl(t.url, BASE)
+  return { ...t, url, ...classify(url) }
+})
 // 同一URLの重複排除(PM Day97)。metadata の canonical/og:url は自サイトの絶対URLなので
 // 「外部」抽出にも載り、内部ターゲットと同じURLを2回叩いていた(実測 /noxa/)。情報量は
 // 増えないのに件数だけが膨らみ、監視の網が実態より広いように読めてしまう。
@@ -274,8 +280,13 @@ const byUrl = new Map()
 for (const t of rawTargets) if (!byUrl.has(t.url)) byUrl.set(t.url, t)
 const targets = [...byUrl.values()]
 const dupCount = rawTargets.length - targets.length
-const softTargets = targets.filter((t) => t.soft)
-const ownTargets = targets.filter((t) => !t.soft)
+// 集計は owner ごとに数える(PM Day101)。朝の実装は `!soft` をまとめて「portal自前」と称して
+// おり、**外部リンク9件が portal 自前に混ざっていた**(実測 googletagmanager / yorulog.vercel.app
+// 等が「portal自前 hard 21」に算入)。hard であることと portal 自前であることは別の話で、
+// 朝が封鎖したはずの「集計の嘘」と同型の誤りが新しいサマリにそのまま残っていた。
+const softTargets = targets.filter((t) => t.owner === 'egtype')
+const portalTargets = targets.filter((t) => t.owner === 'portal')
+const externalTargets = targets.filter((t) => t.owner === 'external')
 
 // floor(Day91/94/96/97 と同じ作法): 分類を URL 由来の述語に委ねた分、CROSS_REPO_PREFIXES を
 // 広げすぎる(極端には '/' を足す)だけで portal 自前のリンク切れまで全て警告のみ・exit 0 に
@@ -289,7 +300,25 @@ if (softOwnRoutes.length > 0) {
   process.exit(1)
 }
 
-console.log(`[check-links] base=${BASE} 内部${internal.length}(featured-apps=${featuredLive ? 'live' : 'dead:除外'} / 実ルート${appRoutes.length}・うち無リンク${unlinkedRoutes.length}) + キャラ画像${charImages.length} + キャラ型頁${charPages.length} + 外部${externals.length} = ${targets.length}件（portal自前 hard ${ownTargets.length} / egtype配信 soft ${softTargets.length}）${dupCount ? `(重複${dupCount}件を排除)` : ''}${STRICT ? ' [strict]' : ''}`)
+// floor その2(PM Day101): 上の floor は母集団が app/ の実ルート4件しかなく、**稼働中ゲームへの
+// 内部リンク(/word-wolf/ /kingscup/ /ramune-puzzle/ 等)を接頭辞で飲み込む形を素通り**させていた
+// (実測: LINKS_CROSS_REPO_PREFIXES に /word-wolf/ を足すと exit 0 のまま soft へ格下げされ、
+// しかも owner 列まで egtype を騙る)。実ルートでない内部リンクこそ Day45 で実 404 を出した箇所で、
+// そこが黙って警告のみになるのは監視の骨抜きそのもの。
+// override は既定より **緩められない** ことを全ターゲットで押さえる(既定で hard の URL が
+// soft に落ちたら異常)。上の実ルート floor とは守る対象が違うので両方置く:
+//   ・実ルート floor … 正本 CROSS_REPO_PREFIXES 自体を広げた場合に効く(既定も一緒に動くので
+//     baseline 比較では検知できない)
+//   ・こちらの floor … 環境変数 override で実行時に緩めた場合に効く(母集団は全ターゲット)
+const baselineSoft = (url) => classifyTargetUrl(url, BASE, CROSS_REPO_PREFIXES).soft
+const downgraded = targets.filter((t) => t.soft && !baselineSoft(t.url))
+if (downgraded.length > 0) {
+  for (const t of downgraded) console.log(`  ✗ 分類異常 [格下げ] ${t.url} は既定では hard だが soft に落ちている`)
+  console.log(`[check-links] ✗ 致命: LINKS_CROSS_REPO_PREFIXES が既定(${CROSS_REPO_PREFIXES.join(',')})より緩く、${downgraded.length}件が警告のみへ格下げされた。`)
+  process.exit(1)
+}
+
+console.log(`[check-links] base=${BASE} 内部${internal.length}(featured-apps=${featuredLive ? 'live' : 'dead:除外'} / 実ルート${appRoutes.length}・うち無リンク${unlinkedRoutes.length}) + キャラ画像${charImages.length} + キャラ型頁${charPages.length} + 外部${externals.length} = ${targets.length}件（hard: portal自前${portalTargets.length} + 外部${externalTargets.length} / soft: egtype配信${softTargets.length}）${dupCount ? `(重複${dupCount}件を排除)` : ''}${STRICT ? ' [strict]' : ''}`)
 
 // --list: 実リクエストを出さずに監視対象だけを吐いて終わる(Day97)。
 // selftest から「何が監視対象になっているか」をネットワーク無しで固定できるようにするための口。
@@ -319,8 +348,9 @@ if (!fatal && hardBad.length === 0 && softBad.length === 0) {
 } else if (!fatal) {
   // 「portal自前 N/N」の N は **portal 自身がデプロイする分だけ** を数える(Day101)。
   // 従来は分母に egtype 配信の33件(キャラ画像32 + /egtype/)が混ざっており、hard で通った
-  // 件数をそのまま「自前」と称していた＝集計の嘘だった。
-  console.log(`[check-links] ✓ portal自前 ${ownTargets.length}/${ownTargets.length} 件 OK（egtype配信 soft ${softTargets.length}件中 ${softBad.length}件未到達＝警告のみ）/ ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合`)
+  // 件数をそのまま「自前」と称していた＝集計の嘘だった。PM で外部リンクも分けた(hard では
+  // あるが portal 自前ではない。混ぜると同じ嘘の作り直しになる)。
+  console.log(`[check-links] ✓ portal自前 ${portalTargets.length}/${portalTargets.length} 件 + 外部 ${externalTargets.length}件 OK（egtype配信 soft ${softTargets.length}件中 ${softBad.length}件未到達＝警告のみ）/ ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合`)
   process.exit(0)
 } else {
   console.log(`[check-links] ✗ 致命 ${hardBad.length}件${localMissing.length ? ` + ローカル静的欠落 ${localMissing.length}件` : ''}${STRICT ? ` + soft ${softBad.length}件` : ''} / 全${results.length}件`)
