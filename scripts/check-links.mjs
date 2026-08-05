@@ -14,7 +14,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fetchWithRetry } from './fetch-with-retry.mjs'
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, CROSS_REPO_PREFIXES } from './lib/extract-targets.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, CROSS_REPO_PREFIXES } from './lib/extract-targets.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -288,33 +288,42 @@ const softTargets = targets.filter((t) => t.owner === 'egtype')
 const portalTargets = targets.filter((t) => t.owner === 'portal')
 const externalTargets = targets.filter((t) => t.owner === 'external')
 
-// floor(Day91/94/96/97 と同じ作法): 分類を URL 由来の述語に委ねた分、CROSS_REPO_PREFIXES を
-// 広げすぎる(極端には '/' を足す)だけで portal 自前のリンク切れまで全て警告のみ・exit 0 に
-// 落とせてしまう＝この修正自身が無言で無効化される経路。**portal がデプロイする実ルートは
-// 必ず hard** という不変条件で押さえる(appRoutes は静的エクスポートで out/ に生えるページ＝
-// 定義上 portal 自前。ここが soft に化けたら分類が壊れている)。
-const softOwnRoutes = appRoutes.filter((p) => classify(BASE + p).soft)
-if (softOwnRoutes.length > 0) {
-  for (const p of softOwnRoutes) console.log(`  ✗ 分類異常 [実ルート] ${p} は portal 自前(app/ の実ルート)なのに soft 判定`)
-  console.log('[check-links] ✗ 致命: portal 自前の実ルートが soft に分類された（CROSS_REPO_PREFIXES が広すぎて自前のリンク切れが警告のみになる）。scripts/lib/extract-targets.mjs を確認すること。')
+// floor(Day91/94/96/97 と同じ作法・PM Day101 で双方向化): 分類を URL 由来の述語に委ねた分、
+// **接頭辞の宣言を書き換えるだけで致命度を好きに動かせる**＝この修正自身を無言で無効化できる
+// 経路が生まれる。そこで宣言(CROSS_REPO_PREFIXES / LINKS_CROSS_REPO_PREFIXES)ではなく
+// **監視ターゲットの出自**を基準線にして、分類が実態と一致していることを両方向で押さえる。
+// 基準線 = ロスター(charImages / charPages)から導いた cross-repo 領域の根(実データでは /egtype/)。
+// 宣言をどう弄っても動かないので、**正本定数の書き換えでも env override でも同じここで落ちる**。
+//
+// 【なぜ両方向か】どちらへ倒れても嘘になるため。hard/soft は監視の強弱ではなく
+// **責任の所在**の分類で、soft は「portal 自身では直せない失敗で cron を常時 red にしない」逃がし弁。
+//   ・soft なのに領域外  … 格下げ(false-green)。portal 自前のリンク切れが警告のみ・exit 0 になる。
+//     朝は「app/ の実ルートは必ず hard」で押さえたが母集団が実ルート4件しかなく、実ルートでない
+//     内部リンク(/word-wolf/ /kingscup/ 等の子アプリ＝リポの CLAUDE.md がリンクパス変更禁止と
+//     明示する監視の要)を飲み込む形は素通りしていた(実測 exit 0・owner 列まで egtype を騙る)。
+//   ・領域内なのに hard … 逃がし弁の消失。Day101 朝が塞いだ実害がそのまま再発する(実測
+//     `LINKS_CROSS_REPO_PREFIXES=/egtype/zzz/` で soft 65→0・**exit 0 のまま**サマリが
+//     「portal自前 76」と称する＝朝が封鎖した「集計の嘘」まで一緒に戻る)。厳格化は一見無害だが、
+//     33体目を足した瞬間に egtype 未デプロイで portal の cron が red になる。
+//     一時的に全部を致命として見たい用途には --strict がある(分類は保ったまま失敗の重さだけ
+//     変える口＝**分類の改竄と検査の厳しさは別の軸**)。
+const crossRepoRoot = crossRepoRootFromRoster([...charImages, ...charPages])
+// 根が '/' に潰れる floor: 全ターゲットが「領域内」に化け、両方向の突合が同時に空振りする。
+if (crossRepoRoot === '/') {
+  console.log('  ✗ 抽出失敗 [cross-repo 領域] ロスターから共通の配信領域を導けない（根が "/" に潰れた）')
+  console.log('[check-links] ✗ 致命: cross-repo 領域の根が "/"（ロスターのパス規約が変わり、hard/soft の突合が母集団ごと空振りする）。scripts/lib/extract-targets.mjs の crossRepoRootFromRoster を確認すること。')
   process.exit(1)
 }
-
-// floor その2(PM Day101): 上の floor は母集団が app/ の実ルート4件しかなく、**稼働中ゲームへの
-// 内部リンク(/word-wolf/ /kingscup/ /ramune-puzzle/ 等)を接頭辞で飲み込む形を素通り**させていた
-// (実測: LINKS_CROSS_REPO_PREFIXES に /word-wolf/ を足すと exit 0 のまま soft へ格下げされ、
-// しかも owner 列まで egtype を騙る)。実ルートでない内部リンクこそ Day45 で実 404 を出した箇所で、
-// そこが黙って警告のみになるのは監視の骨抜きそのもの。
-// override は既定より **緩められない** ことを全ターゲットで押さえる(既定で hard の URL が
-// soft に落ちたら異常)。上の実ルート floor とは守る対象が違うので両方置く:
-//   ・実ルート floor … 正本 CROSS_REPO_PREFIXES 自体を広げた場合に効く(既定も一緒に動くので
-//     baseline 比較では検知できない)
-//   ・こちらの floor … 環境変数 override で実行時に緩めた場合に効く(母集団は全ターゲット)
-const baselineSoft = (url) => classifyTargetUrl(url, BASE, CROSS_REPO_PREFIXES).soft
-const downgraded = targets.filter((t) => t.soft && !baselineSoft(t.url))
-if (downgraded.length > 0) {
-  for (const t of downgraded) console.log(`  ✗ 分類異常 [格下げ] ${t.url} は既定では hard だが soft に落ちている`)
-  console.log(`[check-links] ✗ 致命: LINKS_CROSS_REPO_PREFIXES が既定(${CROSS_REPO_PREFIXES.join(',')})より緩く、${downgraded.length}件が警告のみへ格下げされた。`)
+const inCrossRepoArea = (t) => t.url.startsWith(`${BASE}/`) && t.url.slice(BASE.length).startsWith(crossRepoRoot)
+const misclassified = [
+  ...targets.filter((t) => t.soft && !inCrossRepoArea(t))
+    .map((t) => ({ t, why: `${crossRepoRoot} の外(portal 自前)なのに soft へ格下げされている` })),
+  ...targets.filter((t) => !t.soft && inCrossRepoArea(t))
+    .map((t) => ({ t, why: `${crossRepoRoot} 配下(egtype 配信)なのに hard 扱いで、逃がし弁が消えている` })),
+]
+if (misclassified.length > 0) {
+  for (const { t, why } of misclassified) console.log(`  ✗ 分類異常 [${t.cat}] ${t.url} は ${why}`)
+  console.log(`[check-links] ✗ 致命: 配信主体の分類が実態（${crossRepoRoot} ＝ロスター由来の配信領域）と ${misclassified.length}件ずれている。scripts/lib/extract-targets.mjs の CROSS_REPO_PREFIXES と環境変数 LINKS_CROSS_REPO_PREFIXES を確認すること。`)
   process.exit(1)
 }
 

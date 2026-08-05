@@ -25,7 +25,7 @@ import { fetchWithRetry, isTransientStatus } from './fetch-with-retry.mjs'
 // ための逃がし弁で、従来はカテゴリごとの手書きリテラルだったため実際の配信主体とずれていた
 // (同じ /egtype/ 依存で画像は hard・型ページは soft)。URL 由来の述語に変えた分、今度は
 // 「接頭辞を広げれば自前のリンク切れまで警告のみにできる」経路が生まれるので、そこも押さえる。
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl } from './lib/extract-targets.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster } from './lib/extract-targets.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -480,15 +480,53 @@ function walkRel(dir, prefix = '') {
   // (/word-wolf/ 等の稼働中ゲーム＝Day45 で実 404 を出した箇所)を飲み込む形は素通りしていた。
   // 既定より緩い override は全ターゲットで拒否されること。
   const game = run('/egtype/,/word-wolf/')
-  if (game.status === 1 && /格下げ.*word-wolf/.test(game.stdout)) ok('実ルートでない内部リンク(/word-wolf/)を飲み込む override も拒否する')
+  if (game.status === 1 && /word-wolf.*格下げ/.test(game.stdout)) ok('実ルートでない内部リンク(/word-wolf/)を飲み込む override も拒否する')
   else bad(`実ルート以外を飲み込む override が素通りした: status=${game.status}`)
 
-  // 逆向き(既定より厳しくする=soft を減らす)は監視が強くなるだけなので許容する。
-  // ここを一緒に拒否すると「厳格化までできない」硬直したガードになる。
-  const strictor = run(' ')
-  if (strictor.status !== 0) bad(`厳格化方向の override で落ちた(格下げしていないのに拒否している): status=${strictor.status}`)
-  else if (!/soft: egtype配信0/.test(strictor.stdout)) bad(`厳格化 override の結果がサマリに出ていない: ${strictor.stdout.split('\n')[0]}`)
-  else ok('既定より厳しい override(soft 無し=全て hard)は許容する(負のサニティ)')
+  // 逆向き(soft を減らす=逃がし弁の消失)も拒否する。PM Day101 の当初判断は「厳格化は監視が
+  // 強くなるだけなので許容」だったが、これは誤りだった。hard/soft は監視の強弱ではなく
+  // **責任の所在**の分類で、soft を消すと Day101 朝が塞いだ実害がそのまま再発する:
+  //   ・33体目を足した瞬間に egtype 未デプロイで portal の cron が red(soft を作った目的に反する)
+  //   ・サマリが egtype 配信65件を自前に算入して「portal自前 76」と称する＝集計の嘘の再発
+  // 実測(修正前): soft が 65→0 になっても **exit 0 のまま素通り**していた。
+  // 一時的に全件を致命として見たい用途は --strict が担う(分類は保ったまま失敗の重さだけ変える)。
+  const wiped = run(' ')
+  if (wiped.status === 1 && /逃がし弁が消えている/.test(wiped.stdout)) ok('soft を全廃する override を拒否する(逃がし弁の消失＝集計の嘘と cron red の再発)')
+  else bad(`soft 全廃の override が素通りした: status=${wiped.status}`)
+
+  // 「/egtype/ を名乗ったまま実際には何も掬わない」狭め方も同じ穴。接頭辞が実在しない
+  // サブパスを指すと分類上 egtype は0件になり、上と同じ結末になる(より気づきにくい形)。
+  const narrowed = run('/egtype/zzz/')
+  if (narrowed.status === 1 && /逃がし弁が消えている/.test(narrowed.stdout)) ok('実在しないサブパスへ狭める override も拒否する(/egtype/zzz/)')
+  else bad(`狭すぎる接頭辞が素通りした: status=${narrowed.status}`)
+}
+
+// ㊲-2 基準線(純関数): 双方向 floor の突合相手＝cross-repo 領域の根は、**宣言(接頭辞)ではなく
+//   ロスターから生成した実ターゲット**から導く。これにより正本定数を書き換えても env で
+//   override しても基準線は動かず、同じ floor が落ちる。
+{
+  const real = crossRepoRootFromRoster(['/egtype/characters/pekarin.webp', '/egtype/types/pekarin/'])
+  if (real === '/egtype/') ok('ロスターの実パターン(画像+型ページ)から領域の根 /egtype/ を導く')
+  else bad(`領域の根が想定外: ${real}`)
+
+  // portal 自前(/ や /noxa/)が「領域内」に化けないこと。化けると逆向き floor が
+  // 全ターゲットを「hard なのはおかしい」と誤検知し、死活監視が丸ごと落ちる false-red になる
+  // (PM Day97 で実際に踏んだクラス: 誤検知1件で監視が全損する)。
+  const inArea = (p) => p.startsWith(real)
+  if (!inArea('/') && !inArea('/noxa/') && !inArea('/egramen/') && inArea('/egtype/') && inArea('/egtype/types/x/')) {
+    ok('領域判定が portal 自前(/ ・/noxa/ ・/egramen/)を巻き込まない(false-red 回帰)')
+  } else bad('領域判定が portal 自前まで egtype 領域と見なしている')
+
+  // 最終セグメント(ファイル名・キャラID)は根に含めない。1体しか無い時に領域が
+  // 1ファイルへ縮み、残りの egtype 配信が「領域外なのに soft」として誤検知される。
+  if (crossRepoRootFromRoster(['/egtype/characters/pekarin.webp']) === '/egtype/characters/') {
+    ok('ロスター1件でも最終セグメントは根に含めない(領域が1ファイルへ縮まない)')
+  } else bad(`単一ロスターの根が想定外: ${crossRepoRootFromRoster(['/egtype/characters/pekarin.webp'])}`)
+
+  // 共通部分が無い/空なら根は '/' に潰れる＝本体が致命化すべき状態(下の配線で固定)。
+  if (crossRepoRootFromRoster([]) === '/' && crossRepoRootFromRoster(['/egtype/a/x.webp', '/other/b/']) === '/') {
+    ok('共通部分が無い・空のロスターでは根が "/" に潰れる(本体はこれを致命として扱う)')
+  } else bad('根の潰れ判定が想定外')
 }
 
 // ㊳ 素の origin(https://egshugy.com)とルート表記(https://egshugy.com/)が別ターゲットとして

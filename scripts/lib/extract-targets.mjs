@@ -211,6 +211,31 @@ export function classifyTargetUrl(url, base, prefixes = CROSS_REPO_PREFIXES) {
 }
 
 /**
+ * cross-repo 領域(egtype が配信する範囲)の根を、**ロスターから生成した実ターゲット**の
+ * 最長共通ディレクトリから導く。実データでは `/egtype/characters/*.webp` と
+ * `/egtype/types/<id>/` の共通部分＝`/egtype/`。
+ *
+ * これは分類そのもの(classifyTargetUrl)ではなく、**分類が実態と一致しているかを裏取りする側**の
+ * 基準線。CROSS_REPO_PREFIXES は「宣言」なので定数の書き換えでも env override でも動くが、
+ * こちらは監視ターゲットの生成物から導くので宣言をどう弄っても動かない＝双方向の floor
+ * (soft ⇔ egtype 領域)の突合相手になる(PM Day101 の2本目)。
+ *
+ * 最終セグメント(ファイル名・キャラID)は共通に含めない。1体しか無い場合に
+ * `/egtype/characters/pekarin.webp` 丸ごとが根になり、領域が1ファイルへ縮むのを防ぐ。
+ * 共通部分が無い場合は `/`(＝全ターゲットが領域内という無意味な根)を返す。呼び出し側は
+ * これを致命として扱うこと——`/` を根にすると portal 自前まで「egtype 領域」に化け、
+ * floor が丸ごと空振りする。
+ */
+export function crossRepoRootFromRoster(paths) {
+  if (paths.length === 0) return '/'
+  const split = paths.map((p) => p.split('/').filter(Boolean))
+  const head = split[0]
+  let n = 0
+  while (n < head.length && split.every((s) => s.length > n + 1 && s[n] === head[n])) n++
+  return n === 0 ? '/' : `/${head.slice(0, n).join('/')}/`
+}
+
+/**
  * 自オリジンの「素の origin」表記(https://egshugy.com)をルート表記(https://egshugy.com/)へ揃える。
  * next.config の `trailingSlash: true` によりポータルの正規表記は必ず末尾スラッシュ付きで、両者は
  * 同じ1ページ。ところが `app/layout.tsx` の metadataBase が `new URL('https://egshugy.com')` と
