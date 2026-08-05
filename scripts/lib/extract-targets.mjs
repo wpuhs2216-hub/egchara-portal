@@ -166,6 +166,50 @@ export function findSelfUrlMismatches(entries, origin) {
   return { mismatches, declarations }
 }
 
+// --- 監視ターゲットの配信主体による分類(Day101) ---
+// check-links には hard(失敗=致命 exit 1) / soft(失敗=警告のみ) の2段がある。soft が存在する
+// 理由はただ一つ、「**portal 自身では直せない**＝別リポ egtype のデプロイでしか解消しない
+// 失敗で、portal の cron を常時 red にしない」ため(portal と egtype はセットでデプロイする運用)。
+//
+// ところが従来この2段は **どの配列から来たターゲットか** で手書きのリテラル(`soft: false` /
+// `soft: true`)として決めており、**実際の配信主体と一致していなかった**。実測:
+//   ・portal の `out/`(デプロイ物)に `egtype/` は含まれない＝`/egtype/**` は全て egtype の別デプロイ
+//   ・にもかかわらず `/egtype/characters/*.webp` 32件と `/egtype/` は hard、
+//     `/egtype/types/<id>/` 32件だけが soft ＝ **同じデプロイ依存が正反対の致命度**
+// 実害2つ:
+//   ① 33体目のキャラを足した瞬間、portal 側の `ALL_CHARACTERS` が先に増えるため
+//      `/egtype/characters/<新>.webp` が hard で 404(実測: 存在しない画像は本番で実 404)
+//      → egtype 未デプロイを理由に portal の cron が red。soft を作った目的そのものに反する。
+//      同じ体の型ページは soft なので警告止まり＝同一原因で判定が割れる。
+//   ② サマリが「portal自前 N/N 件 OK」と出すが、その N には egtype 配信の33件が混ざる＝集計の嘘。
+// さらに false-green 側(Day94 が「残る同型」と明示して以来 open): soft はリテラル直書きで
+// 何のガードも無く、`soft: false` → `true` を内部/外部ターゲットに一度書けば portal 自前の
+// リンク切れが全て警告のみ・exit 0 になり「✓ portal自前 N/N OK」と出続ける。
+//
+// よって分類を「どの配列か」ではなく **URL がどこから配信されるか** から導く1つの述語にする。
+// 手書きのリテラルが消えるので、①の割れ方も②の嘘も③の書き換えも構造的に起こせなくなる。
+// egtype が配信するパス接頭辞。portal のデプロイ物(out/)に含まれず、別リポのデプロイでのみ
+// 解消する領域。増える時はここだけを直せばよい(判定は全ターゲットで共有される)。
+export const CROSS_REPO_PREFIXES = ['/egtype/']
+
+/**
+ * 監視ターゲット URL の配信主体を判定する。
+ *   'portal'   … portal 自身がデプロイする(自前で直せる) → hard
+ *   'egtype'   … 別リポ egtype のデプロイでしか解消しない → soft
+ *   'external' … 他所のサービス。portal が貼ったリンクの責任は portal にあるので hard
+ * base は監視先オリジン(末尾スラッシュ無し)。--base で別オリジンを指しても同じ規則で効く。
+ * prefixes は selftest が「広げすぎると何が起きるか」を非破壊で実証するための注入口
+ * (本体は既定の CROSS_REPO_PREFIXES を使う)。
+ * 注意: `startsWith(base)` ではなく `base` 完全一致か `base + '/'` で判定する。前者だと
+ * `https://egshugy.com.example.net/` のような**別ドメイン**を portal 自前(hard)と誤認する。
+ */
+export function classifyTargetUrl(url, base, prefixes = CROSS_REPO_PREFIXES) {
+  if (url !== base && !url.startsWith(`${base}/`)) return { owner: 'external', soft: false }
+  const p = url.slice(base.length) || '/'
+  if (prefixes.some((pre) => p.startsWith(pre))) return { owner: 'egtype', soft: true }
+  return { owner: 'portal', soft: false }
+}
+
 // リンク由来の内部パスをルート由来(末尾スラッシュ付き)と同じ表記に揃える。
 // PM(Day97): next.config の `trailingSlash: true` により `/noxa` と `/noxa/` は同じルートだが、
 // 朝の実装は両者を素の Set で統合していたため、JSX に `href="/noxa"` と書かれた瞬間に

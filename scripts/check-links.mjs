@@ -4,15 +4,17 @@
 // 使い方:
 //   node scripts/check-links.mjs             # 本番 (https://egshugy.com) に対して確認
 //   node scripts/check-links.mjs --base http://192.168.0.77   # オリジン直叩き
-//   node scripts/check-links.mjs --strict    # egtype依存の型ページ(soft)404も致命扱い
+//   node scripts/check-links.mjs --strict    # egtype配信(soft)の404も致命扱い
 //   node scripts/check-links.mjs --list      # 実リクエストを出さず監視対象一覧だけ出す
-// 終了コード: portal自前リンク失敗=1 / soft(egtype型ページ)失敗は既定で警告のみ(0)・--strictで1
+// 終了コード: portal自前リンク失敗=1 / soft(egtype配信 /egtype/**)失敗は既定で警告のみ(0)・--strictで1
 //   (egtype と portal はセットでデプロイ。egtype 未デプロイ中の新16体型ページ404は想定内)
+//   soft/hard は URL の配信主体から導く(Day101・classifyTargetUrl)。カテゴリ名ではないので
+//   「同じ egtype デプロイ依存なのに画像は致命・型ページは警告」のような割れ方は起こらない。
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fetchWithRetry } from './fetch-with-retry.mjs'
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin } from './lib/extract-targets.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, CROSS_REPO_PREFIXES } from './lib/extract-targets.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -247,33 +249,56 @@ if (selfUrlMismatches.length > 0) {
 }
 
 const STRICT = process.argv.includes('--strict')
+// hard/soft は **どの配列から来たか** ではなく **URL がどこから配信されるか** で決める(Day101)。
+// 従来はカテゴリごとの手書きリテラルで、同じ egtype デプロイ依存でありながら
+// キャラ画像32件と /egtype/ が hard・型ページ32件だけが soft という正反対の致命度になっていた。
+// 判定規則と背景は scripts/lib/extract-targets.mjs の classifyTargetUrl を参照。
+// LINKS_CROSS_REPO_PREFIXES は selftest が「接頭辞を広げすぎたら floor が落とす」ことを
+// 正本を改竄せずに実証するための非破壊 override(Day94 の UPTIME_APP_DIR と同じ作法)。
+const crossPrefixes = process.env.LINKS_CROSS_REPO_PREFIXES
+  ? process.env.LINKS_CROSS_REPO_PREFIXES.split(',').map((s) => s.trim()).filter(Boolean)
+  : CROSS_REPO_PREFIXES
+const classify = (url) => classifyTargetUrl(url, BASE, crossPrefixes)
 const rawTargets = [
-  ...internal.map((p) => ({ url: BASE + p, cat: '内部', soft: false })),
-  ...charImages.map((p) => ({ url: BASE + p, cat: 'キャラ画像', soft: false })),
-  ...charPages.map((p) => ({ url: BASE + p, cat: 'キャラ型頁', soft: true })),
-  ...externals.map((u) => ({ url: u, cat: '外部', soft: false })),
-]
+  ...internal.map((p) => ({ url: BASE + p, cat: '内部' })),
+  ...charImages.map((p) => ({ url: BASE + p, cat: 'キャラ画像' })),
+  ...charPages.map((p) => ({ url: BASE + p, cat: 'キャラ型頁' })),
+  ...externals.map((u) => ({ url: u, cat: '外部' })),
+].map((t) => ({ ...t, ...classify(t.url) }))
 // 同一URLの重複排除(PM Day97)。metadata の canonical/og:url は自サイトの絶対URLなので
 // 「外部」抽出にも載り、内部ターゲットと同じURLを2回叩いていた(実測 /noxa/)。情報量は
 // 増えないのに件数だけが膨らみ、監視の網が実態より広いように読めてしまう。
-// soft と hard が同一URLで競合したら hard(厳しい方)を残す。
+// soft/owner は URL の純関数になったので、同一URLなら由来が違っても判定は必ず一致する
+// (＝旧実装にあった「hard を残す」競合解決はもう起こりえない)。先着を残す。
 const byUrl = new Map()
-for (const t of rawTargets) {
-  const prev = byUrl.get(t.url)
-  if (!prev) byUrl.set(t.url, t)
-  else if (prev.soft && !t.soft) byUrl.set(t.url, t)
-}
+for (const t of rawTargets) if (!byUrl.has(t.url)) byUrl.set(t.url, t)
 const targets = [...byUrl.values()]
 const dupCount = rawTargets.length - targets.length
+const softTargets = targets.filter((t) => t.soft)
+const ownTargets = targets.filter((t) => !t.soft)
 
-console.log(`[check-links] base=${BASE} 内部${internal.length}(featured-apps=${featuredLive ? 'live' : 'dead:除外'} / 実ルート${appRoutes.length}・うち無リンク${unlinkedRoutes.length}) + キャラ画像${charImages.length} + キャラ型頁${charPages.length}(soft) + 外部${externals.length} = ${targets.length}件${dupCount ? `(重複${dupCount}件を排除)` : ''}${STRICT ? ' [strict]' : ''}`)
+// floor(Day91/94/96/97 と同じ作法): 分類を URL 由来の述語に委ねた分、CROSS_REPO_PREFIXES を
+// 広げすぎる(極端には '/' を足す)だけで portal 自前のリンク切れまで全て警告のみ・exit 0 に
+// 落とせてしまう＝この修正自身が無言で無効化される経路。**portal がデプロイする実ルートは
+// 必ず hard** という不変条件で押さえる(appRoutes は静的エクスポートで out/ に生えるページ＝
+// 定義上 portal 自前。ここが soft に化けたら分類が壊れている)。
+const softOwnRoutes = appRoutes.filter((p) => classify(BASE + p).soft)
+if (softOwnRoutes.length > 0) {
+  for (const p of softOwnRoutes) console.log(`  ✗ 分類異常 [実ルート] ${p} は portal 自前(app/ の実ルート)なのに soft 判定`)
+  console.log('[check-links] ✗ 致命: portal 自前の実ルートが soft に分類された（CROSS_REPO_PREFIXES が広すぎて自前のリンク切れが警告のみになる）。scripts/lib/extract-targets.mjs を確認すること。')
+  process.exit(1)
+}
+
+console.log(`[check-links] base=${BASE} 内部${internal.length}(featured-apps=${featuredLive ? 'live' : 'dead:除外'} / 実ルート${appRoutes.length}・うち無リンク${unlinkedRoutes.length}) + キャラ画像${charImages.length} + キャラ型頁${charPages.length} + 外部${externals.length} = ${targets.length}件（portal自前 hard ${ownTargets.length} / egtype配信 soft ${softTargets.length}）${dupCount ? `(重複${dupCount}件を排除)` : ''}${STRICT ? ' [strict]' : ''}`)
 
 // --list: 実リクエストを出さずに監視対象だけを吐いて終わる(Day97)。
 // selftest から「何が監視対象になっているか」をネットワーク無しで固定できるようにするための口。
 // 抽出層(lib)の純関数テストだけでは、抽出できていても本体で targets に合流し損ねていれば
 // 監視は増えないまま通ってしまう＝配線までを固定しないと false-green は塞げない。
 if (process.argv.includes('--list')) {
-  for (const t of targets) console.log(`${t.soft ? 'soft' : 'hard'}\t${t.cat}\t${t.url}`)
+  // 4列目に配信主体(owner)を出す。hard/soft がどの根拠で決まったかを外から突合できるようにする
+  // ためで、既存の列位置(0:hard|soft / 1:cat / 2:url)は変えない。
+  for (const t of targets) console.log(`${t.soft ? 'soft' : 'hard'}\t${t.cat}\t${t.url}\t${t.owner}`)
   process.exit(0)
 }
 const results = await Promise.all(targets.map(async (t) => ({ ...t, ...(await check(t.url)) })))
@@ -284,7 +309,7 @@ for (const r of hardBad) console.log(`  ✗ ${r.status || r.err}  [${r.cat}] ${r
 for (const r of softBad) console.log(`  ⚠ ${r.status || r.err}  [${r.cat}] ${r.url}`)
 
 if (softBad.length > 0) {
-  console.log(`[check-links] ⚠ egtype依存(soft) ${softBad.length}/${charPages.length} 件が未到達 — egtype 本番デプロイ待ちなら想定内(portal と egtype はセットでデプロイ)。デプロイ後は --strict で厳格確認。`)
+  console.log(`[check-links] ⚠ egtype依存(soft) ${softBad.length}/${softTargets.length} 件が未到達 — egtype 本番デプロイ待ちなら想定内(portal と egtype はセットでデプロイ)。デプロイ後は --strict で厳格確認。`)
 }
 
 const fatal = hardBad.length > 0 || localMissing.length > 0 || (STRICT && softBad.length > 0)
@@ -292,7 +317,10 @@ if (!fatal && hardBad.length === 0 && softBad.length === 0) {
   console.log(`[check-links] ✓ 全${results.length}件 OK / ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合`)
   process.exit(0)
 } else if (!fatal) {
-  console.log(`[check-links] ✓ portal自前 ${results.length - softBad.length}/${results.length - softBad.length} 件 OK（soft ${softBad.length}件は警告のみ）/ ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合`)
+  // 「portal自前 N/N」の N は **portal 自身がデプロイする分だけ** を数える(Day101)。
+  // 従来は分母に egtype 配信の33件(キャラ画像32 + /egtype/)が混ざっており、hard で通った
+  // 件数をそのまま「自前」と称していた＝集計の嘘だった。
+  console.log(`[check-links] ✓ portal自前 ${ownTargets.length}/${ownTargets.length} 件 OK（egtype配信 soft ${softTargets.length}件中 ${softBad.length}件未到達＝警告のみ）/ ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合`)
   process.exit(0)
 } else {
   console.log(`[check-links] ✗ 致命 ${hardBad.length}件${localMissing.length ? ` + ローカル静的欠落 ${localMissing.length}件` : ''}${STRICT ? ` + soft ${softBad.length}件` : ''} / 全${results.length}件`)

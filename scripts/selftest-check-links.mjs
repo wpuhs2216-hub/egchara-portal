@@ -19,7 +19,13 @@ import os from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { fetchWithRetry, isTransientStatus } from './fetch-with-retry.mjs'
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin } from './lib/extract-targets.mjs'
+//
+// 追加(Day101): 「監視対象の致命度(hard/soft)を何で決めるか」の層も固定する。soft は
+// 「portal 自身では直せない＝egtype のデプロイでしか解消しない失敗で cron を red にしない」
+// ための逃がし弁で、従来はカテゴリごとの手書きリテラルだったため実際の配信主体とずれていた
+// (同じ /egtype/ 依存で画像は hard・型ページは soft)。URL 由来の述語に変えた分、今度は
+// 「接頭辞を広げれば自前のリンク切れまで警告のみにできる」経路が生まれるので、そこも押さえる。
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl } from './lib/extract-targets.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -390,6 +396,76 @@ function walkRel(dir, prefix = '') {
   const good1 = run('https://egshugy.com/noxa/')
   if (good1.status === 0 && !/自己参照ずれ/.test(good1.stdout)) ok('自ルートを指す canonical では素通り(負のサニティ)')
   else bad(`正常な canonical で落ちた: status=${good1.status}`)
+}
+
+// ㉟ 配信主体の判定(純関数)。hard/soft は「どの配列から来たか」ではなく「URL がどこから
+//   配信されるか」で決まる、を規則そのものとして固定する。
+{
+  const B = 'https://egshugy.com'
+  const cases = [
+    ['/',                                   'portal',   false, 'トップは portal 自前'],
+    ['/noxa/',                              'portal',   false, '自前ルートは hard'],
+    ['/egtype/',                            'egtype',   true,  'egtype 入口は soft'],
+    ['/egtype/types/pekarin/',              'egtype',   true,  '型ページは soft'],
+    ['/egtype/characters/pekarin.webp',     'egtype',   true,  'キャラ画像も同じデプロイ依存なので soft(Day101 の主眼)'],
+  ]
+  let bads = []
+  for (const [p, owner, soft, why] of cases) {
+    const got = classifyTargetUrl(B + p, B)
+    if (got.owner !== owner || got.soft !== soft) bads.push(`${p} → ${JSON.stringify(got)} (期待 ${owner}/${soft}: ${why})`)
+  }
+  if (bads.length === 0) ok('配信主体の判定: /egtype/** は画像もページも一律 soft・それ以外の自サイトは hard')
+  else bad(`配信主体の判定がずれている: ${bads.join(' / ')}`)
+
+  const ext = classifyTargetUrl('https://apps.apple.com/jp/app/id123', B)
+  if (ext.owner === 'external' && ext.soft === false) ok('外部リンクは hard(貼った責任は portal 側にあるので警告止まりにしない)')
+  else bad(`外部リンクの判定が想定外: ${JSON.stringify(ext)}`)
+
+  // ドメイン偽装。startsWith(base) だけで判定すると別ドメインを自前(hard)と誤認する。
+  // 誤認された URL は「portal 自前が落ちている」として cron を red にする false-red 源。
+  const spoof = classifyTargetUrl('https://egshugy.com.example.net/egtype/', B)
+  if (spoof.owner === 'external') ok('base を接頭辞に持つだけの別ドメインを自前と誤認しない(egshugy.com.example.net)')
+  else bad(`別ドメインを自前と誤認した: ${JSON.stringify(spoof)}`)
+}
+
+// ㊱ 配線: --list の実出力で /egtype/** が一件残らず soft、かつ portal 自前が一件も soft に
+//   落ちていないこと。純関数が正しくても本体が旧リテラルのままなら致命度は変わらない。
+{
+  const r = spawnSync(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--list'], { encoding: 'utf8' })
+  const rows = r.stdout.split('\n').filter((l) => l.includes('\t')).map((l) => l.split('\t'))
+  const egtypeRows = rows.filter(([, , url]) => url.includes('/egtype/'))
+  const hardEgtype = egtypeRows.filter(([lv]) => lv !== 'soft')
+  const softOwn = rows.filter(([lv, , url]) => lv === 'soft' && !url.includes('/egtype/'))
+  if (r.status === 0 && egtypeRows.length > 0 && hardEgtype.length === 0 && softOwn.length === 0) {
+    ok(`egtype 配信の全${egtypeRows.length}件が soft・portal 自前に soft が無い(致命度がURL由来で一貫)`)
+  } else bad(`致命度の配線が想定外: hardEgtype=${hardEgtype.length} softOwn=${softOwn.length} status=${r.status}`)
+
+  // サマリの「portal自前 N」に egtype 配信を混ぜていないこと(集計の嘘の再発防止)。
+  const ownCount = rows.filter(([lv]) => lv === 'hard').length
+  if (new RegExp(`portal自前 hard ${ownCount} `).test(r.stdout)) ok(`サマリの「portal自前 hard ${ownCount}」が実際の hard 件数と一致(egtype 配信を混ぜていない)`)
+  else bad(`サマリの自前件数が実態とずれている: hard=${ownCount} / stdout=${r.stdout.split('\n')[0]}`)
+}
+
+// ㊲ floor: 分類を URL 由来にした代償として、接頭辞を広げるだけで「自前のリンク切れも
+//   警告のみ・exit 0」に落とせてしまう＝この修正自身を無言で無効化できる経路が生まれる。
+//   portal がデプロイする実ルートは必ず hard、という不変条件で押さえていることを実証する。
+//   LINKS_CROSS_REPO_PREFIXES の非破壊 override を使い正本は改竄しない(Day94 と同じ作法)。
+{
+  const run = (prefixes) => spawnSync(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--list'],
+    { encoding: 'utf8', env: { ...process.env, LINKS_CROSS_REPO_PREFIXES: prefixes } })
+
+  const wide = run('/')
+  if (wide.status === 1 && /分類異常/.test(wide.stdout)) ok('接頭辞を "/" まで広げると即座に exit 1(自前のリンク切れを警告のみに格下げできない)')
+  else bad(`広すぎる接頭辞が素通りした: status=${wide.status}`)
+
+  // 実ルートを名指しで飲み込む形も塞げていること("/" のような極端な値だけの検知ではない)。
+  const narrow = run('/egtype/,/noxa/')
+  if (narrow.status === 1 && /分類異常.*\/noxa\//.test(narrow.stdout)) ok('実ルート1本を接頭辞に足しただけでも分類異常として検知する(/noxa/)')
+  else bad(`実ルートを飲み込む接頭辞が素通りした: status=${narrow.status}`)
+
+  const sane = run('/egtype/')
+  if (sane.status === 0 && !/分類異常/.test(sane.stdout)) ok('既定と同じ接頭辞なら素通り(負のサニティ)')
+  else bad(`正常な接頭辞で落ちた: status=${sane.status}`)
 }
 
 console.log(`\n[selftest-check-links] 結果: pass=${pass} fail=${fail}`)
