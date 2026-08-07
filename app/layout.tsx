@@ -72,9 +72,22 @@ export default function RootLayout({
             __html: `window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}gtag('js',new Date());gtag('config','G-J5KGMEKCF4');`,
           }}
         />
+        {/*
+          SW ブートストラップ。元は「オリジン全体の SW 登録を全解除 → Cache Storage を全消し →
+          /sw.js を再登録」だったが、egshugy.com には子アプリが同居していて /egtype/sw.js
+          (egtype が実際に register している)・/pekarin-chinchiro/sw.js・/word-wolf/sw.js・
+          /kingscup/sw.js がいずれも稼働中。getRegistrations() も caches.keys() も**スコープ無関係に
+          オリジン全体**を返すため、ポータルを開くたびに子アプリ全部の SW とプリキャッシュが
+          消えていた(相互リンクなので通常動線で毎回踏む)。元の意図は yorulog の SW 汚染端末の救済で、
+          汚染の正体は**ルートスコープを握った他所製の SW**。よって:
+            ・解除対象はルートスコープ(scope === origin + '/')かつ /sw.js 以外の登録に限る
+              → 子アプリ(スコープが /egtype/ 等)は巻き込まない
+            ・Cache Storage の全消しは「汚染を実際に見つけた時だけ」行う(平常時は何も消さない)
+          最後に自分の /sw.js を登録する。既に登録済みなら register は冪等。
+        */}
         <script
           dangerouslySetInnerHTML={{
-            __html: `if('serviceWorker' in navigator){navigator.serviceWorker.getRegistrations().then(rs=>Promise.all(rs.map(r=>r.unregister()))).then(()=>caches.keys().then(ks=>Promise.all(ks.map(k=>caches.delete(k))))).then(()=>navigator.serviceWorker.register('/sw.js'))}`,
+            __html: `if('serviceWorker' in navigator){var R=location.origin+'/';navigator.serviceWorker.getRegistrations().then(function(rs){var bad=rs.filter(function(r){return r.scope===R&&!((r.active||r.waiting||r.installing||{}).scriptURL||'').endsWith('/sw.js')});return Promise.all(bad.map(function(r){return r.unregister()})).then(function(){return bad.length?caches.keys().then(function(ks){return Promise.all(ks.map(function(k){return caches.delete(k)}))}):null})}).then(function(){return navigator.serviceWorker.register('/sw.js')}).catch(function(){})}`,
           }}
         />
       </body>
