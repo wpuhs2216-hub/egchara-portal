@@ -1,19 +1,19 @@
-"use client"
-
-import { useEffect } from "react"
+import type { Metadata } from "next"
+import WorkspacesRedirect from "./redirect-client"
 
 /**
- * yorulog の Service Worker が localhost:3000/workspaces にキャッシュを保持してしまう問題への対応。
- * このルートを開いたら強制的にトップ "/" に書き換える。
- * yorulog の SW・キャッシュも layout.tsx で全削除されるので、リロード後はトップが見える。
+ * /workspaces/ は yorulog の Service Worker 汚染端末の救済スタブで、コンテンツを持たない。
+ * 従来は "use client" ページだったため metadata を宣言できず、レイアウト既定の title/description/OG
+ * (＝トップと完全同一)がそのまま出ていた。robots.txt は Allow: / なのでクローラは到達でき、
+ * 「トップと同じ title/description を名乗る中身の無いページ」が重複コンテンツとして索引されうる。
+ * ページ本体を server component に戻して noindex を宣言し、リダイレクト実装だけを client に切り出す。
  */
-export default function WorkspacesRedirect() {
-  useEffect(() => {
-    window.location.replace("/")
-  }, [])
-  return (
-    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#0d0d0d", color: "#f5f5f5", fontFamily: "monospace" }}>
-      <p>EGSHUGY LAB に移動中...</p>
-    </div>
-  )
+export const metadata: Metadata = {
+    title: "移動中… | えぐしゅぎ ラボ",
+    description: "このURLはトップページへ移動します。",
+    robots: { index: false, follow: true },
+}
+
+export default function WorkspacesPage() {
+    return <WorkspacesRedirect />
 }

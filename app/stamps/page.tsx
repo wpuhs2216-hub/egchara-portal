@@ -40,11 +40,14 @@ export default function StampsPage() {
         <div className="min-h-screen bg-background text-foreground pb-20">
             {/* Header */}
             <header className="sticky top-0 z-10 bg-background/80 backdrop-blur-md border-b border-border/50 px-4 py-3 flex items-center gap-3">
+                {/* アイコンだけのリンクは可視テキストが無いので aria-label が唯一のアクセシブル名になる。
+                    このページ唯一の内部リンク＝名前が無いとスクリーンリーダーでは行き止まりになる(WCAG 2.4.4/4.1.2)。 */}
                 <Link
                     href="/"
+                    aria-label="エグキャラ ホームへ戻る"
                     className="p-2 -ml-2 rounded-full hover:bg-secondary transition-colors text-muted-foreground hover:text-foreground"
                 >
-                    <ArrowLeft className="w-5 h-5" />
+                    <ArrowLeft className="w-5 h-5" aria-hidden="true" />
                 </Link>
                 <h1 className="text-lg font-bold">LINE スタンプ</h1>
             </header>

@@ -1,7 +1,7 @@
 {
   "name": "エグキャラ",
   "short_name": "エグキャラ",
-  "description": "16体のエグかわ妖精たち。自虐 × 妖精語 × 匂わせポエムで生まれたキャラクター。",
+  "description": "32体のエグかわ妖精たち。自虐 × 妖精語 × 匂わせポエムで生まれたキャラクター。",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

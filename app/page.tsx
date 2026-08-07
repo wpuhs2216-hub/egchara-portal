@@ -364,7 +364,12 @@ export default function Home() {
               エグキャラ<span className="text-primary">図鑑</span>。全{ALL_CHARACTERS.length}体。
             </h2>
             <p className="mt-3 max-w-xl text-[15px] text-muted-foreground leading-relaxed">
-              診断「エグタイプ」から生まれた妖精たち。危険度ランク S → C 順。あなたはどの子？
+              {/* 実際の並びは「先行ブロック → 新ブロック」の2グループで、降順は各グループ内でしか
+                  成立しない(ALL_CHARACTERS の表示順の契約・check-egtype-parity.mjs の並び順ガード)。
+                  「危険度ランク S → C 順」とだけ書くと C の次に A が戻る実表示と食い違う。
+                  体数はキャラ追加で必ずズレるので配列駆動にする(直書きは総数ハードコードガードが拒否)。 */}
+              診断「エグタイプ」から生まれた妖精たち。先行{ALL_CHARACTERS.filter((c) => !c.isNew).length}体 → 新
+              {ALL_CHARACTERS.filter((c) => c.isNew).length}体の2グループで、各グループ内は危険度ランク S → C 順。あなたはどの子？
             </p>
           </div>
           <div className="text-[14px] text-muted-foreground font-display font-bold bg-card border-[2px] border-border rounded-full px-4 py-2 clay">
