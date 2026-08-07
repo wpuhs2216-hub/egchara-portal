@@ -25,7 +25,7 @@ import { fetchWithRetry, isTransientStatus } from './fetch-with-retry.mjs'
 // ための逃がし弁で、従来はカテゴリごとの手書きリテラルだったため実際の配信主体とずれていた
 // (同じ /egtype/ 依存で画像は hard・型ページは soft)。URL 由来の述語に変えた分、今度は
 // 「接頭辞を広げれば自前のリンク切れまで警告のみにできる」経路が生まれるので、そこも押さえる。
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster } from './lib/extract-targets.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, ogImageRoutesFromFiles, classifyOgDelivery } from './lib/extract-targets.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -544,6 +544,137 @@ function walkRel(dir, prefix = '') {
   const bare = urls.filter((u) => u === B)
   if (bare.length === 0 && urls.includes(`${B}/`)) ok('監視対象に素の origin が残っておらず、ルート表記のみ1件で監視されている')
   else bad(`素の origin が二重監視されている: bare=${bare.length} root=${urls.includes(`${B}/`)}`)
+}
+
+// ㊴ アイコンだけのリンク/ボタンのアクセシブル名(Day104・純関数)。
+//   HTTP は 200 を返すので死活監視では永久に検知できない静的欠陥。判定規則そのものを固定する。
+//   false-red を出さない側に倒す設計（式は「何か描画される」と見なす）も併せて押さえる。
+{
+  const one = (src) => findIconOnlyControlsWithoutName(src)
+  const cases = [
+    ['<Link href="/"><ArrowLeft className="w-5 h-5" /></Link>', 1, 'アイコンのみ・名前なしは指摘'],
+    ['<Link href="/" aria-label="ホームへ戻る"><ArrowLeft /></Link>', 0, 'aria-label があれば名前あり'],
+    ['<Link href="/" title="戻る"><ArrowLeft /></Link>', 0, 'title も名前として扱う'],
+    ['<Link href="/"><ArrowLeft />ホームへ</Link>', 0, '可視テキストがあれば名前あり'],
+    ['<Link href="/"><Icon />{c.name}</Link>', 0, '式は中身を静的に読めない＝名前ありに倒す(false-red を出さない)'],
+    ['<Link href="/"><ArrowLeft />{" "}</Link>', 1, '空白だけの式は名前にならない'],
+    ['<button onClick={() => setOpen(v => !v)}><X /></button>', 1, '属性値のアロー関数の > を開始タグ終端と誤認しない'],
+    ['<a href="/x">テキスト</a>', 0, '要素を子に持たない(アイコンすら無い)ものは対象外'],
+  ]
+  const bads = []
+  for (const [src, want, why] of cases) {
+    const got = one(src).offenders.length
+    if (got !== want) bads.push(`${why}: 期待${want}件 実際${got}件`)
+  }
+  if (bads.length === 0) ok('アイコンのみのリンク/ボタンの名前判定が規則どおり(名前なしだけを指摘・式は誤検知しない)')
+  else bad(`a11y 名前判定がずれている: ${bads.join(' / ')}`)
+
+  // floor の母集団: 「子を持つ Link/a/button を何個見たか」が数えられていること。
+  // ここが 0 のまま通ると、指摘0件＝「✓ 問題なし」としてガードだけが無言で消える。
+  const scanned = one('<Link href="/"><A /></Link><button><B /></button>').scanned
+  if (scanned === 2) ok('走査した母集団(scanned)を数えている(0件を致命化する floor の根拠)')
+  else bad(`scanned が想定外: ${scanned}`)
+}
+
+// ㊵ リダイレクトスタブの索引制御(Day104・純関数)。中身の無い即リダイレクトのルートが
+//   noindex を宣言しているか。宣言しないとレイアウト既定＝トップと同一の title/description を
+//   名乗る空ページが重複コンテンツとして索引されうる(sitemap 非掲載は索引されない保証ではない)。
+{
+  const stub = 'window.location.replace("/")'
+  const noindex = 'export const metadata = { robots: { index: false, follow: true } }'
+  const cases = [
+    [[{ route: '/w/', files: [{ rel: 'w/page.tsx', src: stub }] }], 1, 'リダイレクトのみ・noindex 無しは指摘'],
+    [[{ route: '/w/', files: [{ rel: 'w/page.tsx', src: `${noindex}\n${stub}` }] }], 0, '同一ファイルの noindex を認める'],
+    [[{ route: '/w/', files: [{ rel: 'w/page.tsx', src: noindex }, { rel: 'w/redirect-client.tsx', src: stub }] }], 0,
+      'server/client 分割(本 Day の実装形)でもディレクトリ単位で認める'],
+    [[{ route: '/', files: [{ rel: 'page.tsx', src: '<h1>ホーム</h1>' }] }], 0, 'リダイレクトしない実ページは対象外'],
+    [[{ route: '/w/', files: [{ rel: 'w/page.tsx', src: 'location.href = "/"' }] }], 1, 'location.href 代入形も検知する'],
+  ]
+  const bads = []
+  for (const [dirs, want, why] of cases) {
+    const got = findRedirectStubsWithoutNoindex(dirs).length
+    if (got !== want) bads.push(`${why}: 期待${want}件 実際${got}件`)
+  }
+  if (bads.length === 0) ok('リダイレクトスタブの noindex 判定が規則どおり(分割実装も認め、実ページは巻き込まない)')
+  else bad(`noindex 判定がずれている: ${bads.join(' / ')}`)
+}
+
+// ㊶ OG 画像の配信ヘッダ(Day104・純関数)。「200 が返るか」ではなく「画像として配信されているか」。
+//   実測で拡張子なしの OG は 200 だが content-type ヘッダが無く、res.ok しか見ない従来の検査では
+//   対象に載せても検知できなかった。
+{
+  const routes = ogImageRoutesFromFiles([
+    'opengraph-image.tsx', 'twitter-image.tsx', 'noxa/opengraph-image.tsx',
+    'page.tsx', 'layout.tsx', 'icon.png', 'noxa/opengraph-image.tsx',
+  ])
+  const want = ['/noxa/opengraph-image.png', '/opengraph-image.png', '/twitter-image.png']
+  if (JSON.stringify(routes) === JSON.stringify(want)) {
+    ok('OG ルート抽出: ファイル規約から拡張子つき配信パスを導く(重複排除・ページは巻き込まない)')
+  } else bad(`OG ルート抽出が想定外: ${JSON.stringify(routes)}`)
+
+  const cases = [
+    [{ status: 200, contentType: 'image/png' }, 'ok', '200 かつ image/* は期待どおり'],
+    [{ status: 200, contentType: null }, 'bad-type', '200 でも型ヘッダが無いのが本 Day の欠陥そのもの'],
+    [{ status: 200, contentType: 'text/html; charset=utf-8' }, 'bad-type', '画像以外の型で返るのも欠陥'],
+    [{ status: 404, contentType: null }, 'pending-deploy', '404 は本番未反映(人間ゲート待ち)＝非致命'],
+    [{ status: 503, contentType: null }, 'unreachable', '5xx は瞬断扱いの警告'],
+  ]
+  const bads = []
+  for (const [res, wantV, why] of cases) {
+    const got = classifyOgDelivery(res)
+    if (got !== wantV) bads.push(`${why}: 期待${wantV} 実際${got}`)
+  }
+  if (bads.length === 0) ok('OG 配信の分類が規則どおり(型なし＝致命 / 未反映＝非致命 の切り分け)')
+  else bad(`OG 配信の分類がずれている: ${bads.join(' / ')}`)
+}
+
+// ㊷ 配線(Day104): 純関数が正しくても、本体が走査していない/致命化していなければ何も守れない。
+//   LINKS_APP_DIR の非破壊 override でフィクスチャを見せ、正本を改竄せずに exit まで固定する。
+//   --list を使うので実ネットワークは発生しない(3つの検査はいずれも fetch より前段)。
+{
+  const fixtures = fs.mkdtempSync(path.join(os.tmpdir(), 'links-app-'))
+  const write = (rel, src) => {
+    const full = path.join(fixtures, rel)
+    fs.mkdirSync(path.dirname(full), { recursive: true })
+    fs.writeFileSync(full, src)
+  }
+  const run = (dir) => spawnSync(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--list'],
+    { encoding: 'utf8', env: { ...process.env, LINKS_APP_DIR: dir } })
+
+  // (a) 名前の無いアイコンリンクがあれば致命。
+  const a = path.join(fixtures, 'a')
+  write('a/page.tsx', '<Link href="/"><ArrowLeft className="w-5 h-5" /></Link>')
+  write('a/opengraph-image.tsx', 'export default function OG() {}')
+  const ra = run(a)
+  if (ra.status === 1 && /名前なし.*a11y/.test(ra.stdout)) ok('配線: 名前の無いアイコンリンクで exit 1(a11y ガードが本体に届いている)')
+  else bad(`a11y ガードが本体で効いていない: status=${ra.status}`)
+
+  // (b) 名前はあるが、リダイレクトスタブが noindex を宣言していなければ致命。
+  const b = path.join(fixtures, 'b')
+  write('b/page.tsx', '<Link href="/" aria-label="ホーム"><ArrowLeft /></Link>')
+  write('b/opengraph-image.tsx', 'export default function OG() {}')
+  write('b/workspaces/page.tsx', 'window.location.replace("/")')
+  const rb = run(b)
+  if (rb.status === 1 && /noindex なし/.test(rb.stdout)) ok('配線: noindex 無しのリダイレクトスタブで exit 1(索引ガードが本体に届いている)')
+  else bad(`索引ガードが本体で効いていない: status=${rb.status}`)
+
+  // (c) 走査の母集団が消えたら致命(floor)。OG ファイルが1件も無い＝Next のファイル規約変更で
+  //     共有カードの配信検査が無言化した状態。0件のまま進めば「✓」と出続ける。
+  const c = path.join(fixtures, 'c')
+  write('c/page.tsx', '<Link href="/" aria-label="ホーム"><ArrowLeft /></Link>')
+  const rc = run(c)
+  if (rc.status === 1 && /OG 画像ルートを1件も抽出できない/.test(rc.stdout)) ok('配線: OG ルート0件を致命化する floor が効いている')
+  else bad(`OG floor が効いていない: status=${rc.status}`)
+
+  // (d) 負のサニティ: 正本の app/ では 3 つとも素通りし、OG 対象が `# og` 行として出ること。
+  //     行が出ない＝配線が切れていても (a)(b)(c) は全部通るため、ここまで見て初めて固定になる。
+  const rd = spawnSync(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--list'], { encoding: 'utf8' })
+  const ogLines = rd.stdout.split('\n').filter((l) => l.startsWith('# og '))
+  if (rd.status === 0 && ogLines.length >= 4 && ogLines.every((l) => l.endsWith('.png'))) {
+    ok(`配線: 正本 app/ は3ガードとも素通りし、OG 対象${ogLines.length}件が拡張子つきで監視対象に出る`)
+  } else bad(`正本での配線が想定外: status=${rd.status} og=${ogLines.length}`)
+
+  fs.rmSync(fixtures, { recursive: true, force: true })
 }
 
 console.log(`\n[selftest-check-links] 結果: pass=${pass} fail=${fail}`)

@@ -40,7 +40,10 @@ export async function fetchWithRetry(url, {
         signal: AbortSignal.timeout(timeoutMs),
         headers: { 'User-Agent': 'Mozilla/5.0 (egchara-linkcheck)' },
       })
-      result = { url, status: res.status, ok: res.ok, attempts: attempt }
+      // content-type も返す(Day104)。res.ok だけを見ていた頃は「200 だが型ヘッダが無い」
+      // OG 画像の配信欠陥を、対象に載せても検知できなかった。headers を持たないモック
+      // (selftest)でも落ちないよう任意連鎖で読む。
+      result = { url, status: res.status, ok: res.ok, attempts: attempt, contentType: res.headers?.get?.('content-type') ?? null }
     } catch (e) {
       result = { url, status: 0, ok: false, err: e.name, attempts: attempt }
     }

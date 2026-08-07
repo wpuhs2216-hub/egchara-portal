@@ -109,7 +109,41 @@ const total = portal.length
 // コードしているため、キャラ増減時にタグラインだけ stale 化しうる(page.tsx の UI は
 // {ALL_CHARACTERS.length} 駆動化済み=Day49)。"1体" 等の別用途と混同しないよう
 // 「N体のエグかわ」限定で総数一致を検査する。
-const taglineFiles = ['app/layout.tsx', 'app/opengraph-image.tsx', 'app/page.tsx']
+//
+// 母集団は「手書きの3ファイル固定」だった(Day104 まで)。そのため .tsx 以外の配信物である
+// public/manifest.json のタグラインだけが2世代前("16体")のまま生き残り、PWA インストール
+// 導線にだけ古い総数が出ていた＝ガードの取りこぼし。母集団を宣言ではなく**配信物の走査**から
+// 導き、タグラインを持つファイルが増えても自動で対象に入るようにする。
+const TAGLINE_SCAN_DIRS = ['app', 'public', 'components']
+const TAGLINE_SCAN_EXT = /\.(tsx|ts|jsx|js|json|webmanifest)$/
+function collectTaglineScanFiles() {
+  const out = []
+  for (const d of TAGLINE_SCAN_DIRS) {
+    const root = path.join(PORTAL_DIR, d)
+    if (!fs.existsSync(root)) continue
+    const stack = [root]
+    while (stack.length) {
+      const dir = stack.pop()
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, e.name)
+        if (e.isDirectory()) stack.push(full)
+        else if (TAGLINE_SCAN_EXT.test(e.name)) out.push(path.relative(PORTAL_DIR, full).split(path.sep).join('/'))
+      }
+    }
+  }
+  return out.sort()
+}
+const taglineFiles = collectTaglineScanFiles()
+// floor: 走査で導いた母集団が、既知のタグライン保持ファイルを必ず含むこと。走査条件を
+// 「.tsx だけ」「app/ だけ」に絞り直すと母集団が黙って縮み、本 Day が直した取りこぼしが
+// そのまま再発する(縮んでも「✓ 整合」と出るので実行結果からは気づけない)。母集団は走査、
+// 下限は別出自(既知の配信物)から取り、両者が一致しなくなった時点で落とす。
+for (const rel of ['app/layout.tsx', 'app/opengraph-image.tsx', 'app/page.tsx', 'public/manifest.json']) {
+  if (!taglineFiles.includes(rel)) {
+    console.log(`✗ 総数コピー走査もれ: ${rel} が母集団に入っていない(TAGLINE_SCAN_DIRS/EXT が狭すぎる)`)
+    issues++
+  }
+}
 for (const rel of taglineFiles) {
   const src = fs.readFileSync(path.join(PORTAL_DIR, rel), 'utf8')
   const tagRe = /(\d+)\s*体のエグかわ/g
@@ -274,6 +308,36 @@ for (const rel of taglineFiles) {
         console.log(`✗ 図鑑並び順 ${rel}: ${label}ブロックで危険度が S→A→B→C 降順でない(${list[i - 1].id}=${list[i - 1].rank} の後に ${list[i].id}=${list[i].rank})`)
         issues++
       }
+    }
+  }
+
+  // ③ 文言と実表示順の突合(Day104)
+  // ①② は「各コホート内が降順」という**内部契約**だけを固定しており、ユーザーに見せている
+  // 説明文とは一度も突合していなかった。実際、図鑑の説明文は「危険度ランク S → C 順」とだけ
+  // 述べており、実バッジ列は S S S S A A A B B B B C C C C C / A A A A A B ... と C の次に A へ
+  // 戻る(2コホート構成)＝文言が実表示と食い違っていた。文言側が主張する並びを読み取り、
+  // 実データがその主張を満たすかを検査する(コホートを名乗るなら②で足りる／全体降順を
+  // 名乗るなら配列全体の降順を要求する)。
+  const copyLine = (src.match(/[^\n<>]*危険度ランク[^\n<>]*/) || [])[0] || ''
+  if (!copyLine.trim()) {
+    console.log(`✗ 図鑑文言 ${rel}: 並び順を説明するコピー(「危険度ランク…」)が見つからない(文言が消えた/書き換わり突合が無言化した可能性)`)
+    issues++
+  } else {
+    const claimsRankOrder = /S\s*(?:→|->|〜|~)\s*C/.test(copyLine)
+    const claimsCohort = /(グループ|ブロック|コホート|先行\s*\d+\s*体|新\s*\d+\s*体)/.test(copyLine)
+    if (claimsRankOrder && !claimsCohort) {
+      // 「S → C 順」とだけ言う＝配列全体が降順であるという主張。実データで検証する。
+      for (let i = 1; i < rows.length; i++) {
+        if (RANK_ORDER[rows[i].rank] < RANK_ORDER[rows[i - 1].rank]) {
+          console.log(`✗ 図鑑文言 ${rel}: 文言は全体の「S → C 順」を謳うが実表示は ${rows[i - 1].id}=${rows[i - 1].rank} の次に ${rows[i].id}=${rows[i].rank}(2コホート構成)。文言かデータのどちらかを合わせること`)
+          issues++
+          break
+        }
+      }
+    }
+    if (claimsCohort && firstNew === -1) {
+      console.log(`✗ 図鑑文言 ${rel}: 文言は2グループ構成を謳うが ALL_CHARACTERS に新コホート(isNew)が無い`)
+      issues++
     }
   }
 }

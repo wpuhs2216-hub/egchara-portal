@@ -255,3 +255,127 @@ export function canonicalizeTargetUrl(url, base) {
 export function normalizeRoutePath(p) {
   return p.endsWith('/') ? p : `${p}/`
 }
+
+// --- アイコンだけのリンク/ボタンのアクセシブル名(Day104) ---
+// 実測: `app/stamps/page.tsx` の戻るリンクは lucide `<ArrowLeft>` だけを子に持ち、可視テキストも
+// aria-label も title も無かった。**そのページ唯一の内部リンク**なので、スクリーンリーダーでは
+// 名前の無いリンクが1つあるだけの行き止まりになる(WCAG 2.4.4 リンクの目的 / 4.1.2 名前・役割・値)。
+// 同等のリンクがトップ(app/page.tsx)には aria-label 付きで存在しており、非対称＝書き忘れだった。
+// HTTP 検査では 200 が返るので死活監視では永久に検知できない静的な欠陥で、check-links の
+// 「自己URLずれ」と同じく**ネットワークを見ずに確定する種類**なのでここで押さえる。
+//
+// 判定: 開始タグに aria-label / aria-labelledby / title が無く、子に要素があるのに
+// 可視テキストが1文字も無いもの。`{c.name}` のような式は「何か描画される」と見なして名前あり扱い
+// (式の中身までは静的に読めない＝false-red を出さない側に倒す)。空白だけの {" "} は無視する。
+const A11Y_NAME_ATTR_RE = /(?:aria-label|aria-labelledby|title)\s*=/
+const JSX_COMMENT_RE = /\{\/\*[\s\S]*?\*\/\}/g
+const JSX_BLANK_EXPR_RE = /\{\s*["'`]\s*["'`]\s*\}/g
+
+// 開始タグの終端 `>` を返す。属性値の式に含まれる `>`(アロー関数 `() =>` 等)を終端と
+// 誤認しないよう波括弧の深さを見る。
+function endOfOpenTag(src, start) {
+  let depth = 0
+  for (let i = start; i < src.length; i++) {
+    const ch = src[i]
+    if (ch === '{') depth++
+    else if (ch === '}') depth--
+    else if (ch === '>' && depth === 0) return i
+  }
+  return -1
+}
+
+// 戻り値は { offenders, scanned }。scanned は「子を持つ Link/a/button を何個検査したか」で、
+// 呼び出し側が0件を致命にできるようにするための floor 用(Day91/94/96 と同じ作法)。JSX の記法や
+// 整形が変わってタグ走査が黙って0件になると、指摘0件＝「✓ 問題なし」と出続けてしまう。
+export function findIconOnlyControlsWithoutName(src, { tags = ['Link', 'a', 'button'] } = {}) {
+  const out = []
+  let scanned = 0
+  for (const tag of tags) {
+    const openRe = new RegExp(`<${tag}\\b`, 'g')
+    for (const m of src.matchAll(openRe)) {
+      const gt = endOfOpenTag(src, m.index)
+      if (gt === -1) continue
+      const openTag = src.slice(m.index, gt + 1)
+      if (openTag.endsWith('/>')) continue           // 子を持たない＝アイコンすら無い
+      const close = src.indexOf(`</${tag}>`, gt)
+      if (close === -1) continue
+      const children = src.slice(gt + 1, close)
+      if (new RegExp(`<${tag}\\b`).test(children)) continue // 入れ子は内側の走査で拾う
+      scanned++
+      if (A11Y_NAME_ATTR_RE.test(openTag)) continue
+      const hasElement = /<[A-Za-z]/.test(children)
+      const text = children
+        .replace(JSX_COMMENT_RE, '')
+        .replace(JSX_BLANK_EXPR_RE, '')
+        .replace(/<[^>]*>/g, '')
+        .trim()
+      if (!hasElement || text.length > 0) continue
+      out.push({ tag, snippet: openTag.replace(/\s+/g, ' ').slice(0, 90) })
+    }
+  }
+  return { offenders: out, scanned }
+}
+
+// --- リダイレクトスタブの索引制御(Day104) ---
+// 実測: `/workspaces/`(SW 汚染端末の救済スタブ)は `location.replace("/")` するだけの中身の無い
+// ページなのに、metadata を一切宣言していなかったためレイアウト既定の title/description/OG
+// (＝トップと完全同一)を名乗っていた。robots.txt は `Allow: /` なのでクローラは到達でき、
+// JS を実行しない相手にはリダイレクトも起きない＝「トップと同じ名前の空ページ」が重複コンテンツ
+// として索引されうる。sitemap 非掲載は索引されない保証にはならない。
+// スタブ(=クライアント側で即リダイレクトするルート)には noindex 宣言を必須にする。
+const CLIENT_REDIRECT_RE = /(?:window\s*\.\s*)?location\s*\.\s*(?:replace|assign)\s*\(|(?:window\s*\.\s*)?location\s*\.\s*href\s*=/
+const NOINDEX_RE = /robots\s*:\s*\{[^}]*index\s*:\s*false/
+
+/**
+ * routeDirs: [{ route: '/workspaces/', files: [{ rel, src }] }]
+ * ルートのディレクトリ内に即リダイレクトの実装がありながら、同ディレクトリのどこにも
+ * robots.index:false の宣言が無いものを返す。
+ */
+export function findRedirectStubsWithoutNoindex(routeDirs) {
+  const out = []
+  for (const { route, files } of routeDirs) {
+    if (!files.some((f) => CLIENT_REDIRECT_RE.test(f.src))) continue
+    if (files.some((f) => NOINDEX_RE.test(f.src))) continue
+    out.push({ route, files: files.map((f) => f.rel) })
+  }
+  return out
+}
+
+// --- OG 画像の配信ヘッダ(Day104) ---
+// 実測: `HEAD https://egshugy.com/opengraph-image` は 200・content-length 358903 を返すのに
+// **content-type ヘッダが無い**(`/icon.png` は image/png)。`output: "export"` × ファイルベース OG は
+// `out/opengraph-image`(拡張子なし)を吐き、静的配信側が拡張子から型を推定できないため。中身は
+// 正しい PNG でヘッダだけの問題だが、型を見て弾くクローラでは共有カードの画像が出ない。
+// `/twitter-image`・`/noxa/opengraph-image`・`/stamps/opengraph-image` も同じ。
+// 配信物側は scripts/postbuild-og-ext.mjs が拡張子つきの複製(<path>.png)を出して解消する。
+// ここではその「拡張子つきの配信物」が本番でどう返っているかを判定する述語を置く。
+const OG_FILE_RE = /^(?:(.*)\/)?(opengraph-image|twitter-image)\.(?:tsx|ts|jsx|js)$/
+
+/**
+ * app/ 配下の相対ファイル一覧から、OG 画像ルートの「拡張子つき配信パス」を導く。
+ * 例: ['opengraph-image.tsx', 'noxa/opengraph-image.tsx'] → ['/opengraph-image.png', '/noxa/opengraph-image.png']
+ */
+export function ogImageRoutesFromFiles(files) {
+  const out = []
+  for (const f of files) {
+    const m = OG_FILE_RE.exec(f)
+    if (!m) continue
+    out.push(`/${m[1] ? `${m[1]}/` : ''}${m[2]}.png`)
+  }
+  return [...new Set(out)].sort()
+}
+
+/**
+ * OG 画像の配信結果の分類。
+ *   'ok'             … 200 かつ image/* → 期待どおり
+ *   'bad-type'       … 200 なのに image/* でない/ヘッダ無し → **本 Day が直した欠陥そのもの**(致命)
+ *   'pending-deploy' … 404 → 拡張子つきの配信物はビルドには入っているが本番未反映(人間ゲート)。
+ *                      デプロイ待ちで cron を red にしないため非致命。配信物側の正しさは
+ *                      postbuild のビルド時アサーションが担保する(そちらは build を落とす)。
+ *   'unreachable'    … それ以外(5xx/瞬断) → 警告
+ */
+export function classifyOgDelivery({ status, contentType }) {
+  if (status === 200) return /^image\//i.test(contentType || '') ? 'ok' : 'bad-type'
+  if (status === 404) return 'pending-deploy'
+  return 'unreachable'
+}

@@ -14,7 +14,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fetchWithRetry } from './fetch-with-retry.mjs'
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, CROSS_REPO_PREFIXES } from './lib/extract-targets.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, CROSS_REPO_PREFIXES, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, ogImageRoutesFromFiles, classifyOgDelivery } from './lib/extract-targets.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -248,6 +248,63 @@ if (selfUrlMismatches.length > 0) {
   process.exit(1)
 }
 
+// --- アイコンだけのリンク/ボタンにアクセシブル名があるか(Day104) ---
+// リンクの「到達できるか」は HTTP で見ているが、「そのリンクを名前で識別できるか」は
+// 200 が返る限り死活監視では永久に検知できない。実測で /stamps/ の戻るリンク(そのページ
+// 唯一の内部リンク)が名前を持たず、スクリーンリーダーでは行き止まりになっていた。
+// 自己URLずれと同じ「ネットワークを見ずに確定する静的欠陥」なのでここで落とす。
+// LINKS_APP_DIR は selftest がフィクスチャを見せるための非破壊 override(LINKS_SELFURL_DIR と同作法)。
+const APP_DIR = process.env.LINKS_APP_DIR ? path.resolve(process.env.LINKS_APP_DIR) : path.join(ROOT, 'app')
+const appTsxEntries = collectPageFiles(APP_DIR)
+  .filter((f) => f.endsWith('.tsx'))
+  .map((f) => ({ file: f, src: fs.readFileSync(path.join(APP_DIR, f), 'utf8') }))
+const a11yOffenders = []
+let a11yScanned = 0
+for (const e of appTsxEntries) {
+  const { offenders, scanned } = findIconOnlyControlsWithoutName(e.src)
+  a11yScanned += scanned
+  for (const o of offenders) a11yOffenders.push({ file: e.file, ...o })
+}
+// 母集団0件の floor(Day91 と同型)。JSX の記法・整形が変わってタグ走査が黙って0件になると
+// 「指摘0件＝問題なし」と出続け、このガードだけが無言で消える。
+if (a11yScanned === 0) {
+  console.log('  ✗ 抽出失敗 [a11y] app/ から子を持つ Link/a/button を1件も走査できない')
+  console.log('[check-links] ✗ 致命: a11y 走査の母集団が0件（JSX 記法の変更でガードが無言化した可能性）。scripts/lib/extract-targets.mjs の findIconOnlyControlsWithoutName を確認すること。')
+  process.exit(1)
+}
+if (a11yOffenders.length > 0) {
+  for (const o of a11yOffenders) {
+    console.log(`  ✗ 名前なし  [a11y] app/${o.file}: ${o.snippet} … 可視テキストも aria-label も無い(スクリーンリーダーで識別不能)`)
+  }
+  console.log(`[check-links] ✗ 致命: アクセシブル名の無いアイコンのみのリンク/ボタン ${a11yOffenders.length}件（HTTP は 200 を返すため死活監視では検知できない・WCAG 2.4.4/4.1.2）。`)
+  process.exit(1)
+}
+
+// --- リダイレクトスタブが noindex を宣言しているか(Day104) ---
+// 中身を持たず即リダイレクトするだけのルート(/workspaces/ = SW 汚染端末の救済)は、metadata を
+// 宣言しないとレイアウト既定＝トップと完全同一の title/description/OG を名乗る。robots.txt は
+// Allow: / でクローラは到達でき、JS を実行しない相手にはリダイレクトも起きない＝「トップと同じ
+// 名前の空ページ」が重複コンテンツとして索引されうる。sitemap 非掲載は索引されない保証ではない。
+{
+  const byDir = new Map()
+  for (const e of appTsxEntries) {
+    const parts = e.file.split('/')
+    parts.pop()
+    const dir = parts.join('/')
+    if (!byDir.has(dir)) byDir.set(dir, [])
+    byDir.get(dir).push({ rel: e.file, src: e.src })
+  }
+  const routeDirs = [...byDir.entries()].map(([dir, files]) => ({ route: `/${dir ? `${dir}/` : ''}`, files }))
+  const stubs = findRedirectStubsWithoutNoindex(routeDirs)
+  if (stubs.length > 0) {
+    for (const s of stubs) {
+      console.log(`  ✗ noindex なし  [索引] ${s.route}: 即リダイレクトのスタブなのに robots.index:false が無い(${s.files.join(', ')})`)
+    }
+    console.log(`[check-links] ✗ 致命: 索引制御の無いリダイレクトスタブ ${stubs.length}件（トップと同一メタの空ページが重複コンテンツとして索引されうる）。`)
+    process.exit(1)
+  }
+}
+
 const STRICT = process.argv.includes('--strict')
 // hard/soft は **どの配列から来たか** ではなく **URL がどこから配信されるか** で決める(Day101)。
 // 従来はカテゴリごとの手書きリテラルで、同じ egtype デプロイ依存でありながら
@@ -333,13 +390,45 @@ console.log(`[check-links] base=${BASE} 内部${internal.length}(featured-apps=$
 // selftest から「何が監視対象になっているか」をネットワーク無しで固定できるようにするための口。
 // 抽出層(lib)の純関数テストだけでは、抽出できていても本体で targets に合流し損ねていれば
 // 監視は増えないまま通ってしまう＝配線までを固定しないと false-green は塞げない。
+// OG 画像の配信ヘッダ検査(Day104)の対象。app/ の OG 規約から導いた「拡張子つき」URL。
+// 通常ターゲット(targets)には混ぜない: これらは配信物としては新設で、本番へ反映されるまで
+// 404 が正常な状態が続く。hard に載せれば人間ゲートのデプロイ待ちで cron が毎日 red になり、
+// soft に落とせば Day101 PM2 の双方向 floor(soft ⇔ egtype 領域)を破る。よって
+// **別枠・非致命(デプロイ待ち)／型の異常だけ致命** という独立した段として扱う。
+const ogRoutes = ogImageRoutesFromFiles(collectPageFiles(APP_DIR))
+if (ogRoutes.length === 0) {
+  console.log('  ✗ 抽出失敗 [OG配信] app/ から OG 画像ルートを1件も抽出できない')
+  console.log('[check-links] ✗ 致命: OG ルート抽出が0件（Next のファイル規約変更で共有カードの配信検査が無言化した可能性）。')
+  process.exit(1)
+}
+
 if (process.argv.includes('--list')) {
   // 4列目に配信主体(owner)を出す。hard/soft がどの根拠で決まったかを外から突合できるようにする
   // ためで、既存の列位置(0:hard|soft / 1:cat / 2:url)は変えない。
   for (const t of targets) console.log(`${t.soft ? 'soft' : 'hard'}\t${t.cat}\t${t.url}\t${t.owner}`)
+  // OG 配信ヘッダ検査の対象は別枠なのでタブ区切りの列には混ぜず、`# og` 行として出す
+  // (既存の列パースを壊さずに配線を外から固定できるようにするため)。
+  for (const r of ogRoutes) console.log(`# og ${BASE}${r}`)
   process.exit(0)
 }
 const results = await Promise.all(targets.map(async (t) => ({ ...t, ...(await check(t.url)) })))
+
+// --- OG 画像の配信ヘッダ(Day104) ---
+// 「200 が返るか」ではなく「**画像として配信されているか**」を見る。実測で拡張子なしの OG は
+// 200 だが content-type ヘッダが無く、res.ok しか見ない従来の検査では対象に載せても検知できない。
+const ogResults = await Promise.all(ogRoutes.map(async (r) => {
+  const res = await fetchWithRetry(`${BASE}${r}`)
+  return { route: r, ...res, verdict: classifyOgDelivery(res) }
+}))
+const ogBadType = ogResults.filter((r) => r.verdict === 'bad-type')
+const ogPending = ogResults.filter((r) => r.verdict === 'pending-deploy')
+const ogUnreachable = ogResults.filter((r) => r.verdict === 'unreachable')
+for (const r of ogBadType) console.log(`  ✗ 型なし  [OG配信] ${r.url} は 200 だが content-type=${r.contentType ?? '(無し)'}＝画像として配信されていない(共有カードで画像が出ない)`)
+for (const r of ogUnreachable) console.log(`  ⚠ ${r.status || r.err}  [OG配信] ${r.url}`)
+if (ogPending.length > 0) {
+  console.log(`[check-links] ⓘ OG配信 ${ogPending.length}/${ogRoutes.length} 件が本番未反映(404) — 拡張子つき OG はビルド物には含まれる(postbuild-og-ext)。本番反映は人間ゲートの npm run deploy 待ち＝想定内。`)
+}
+
 const hardBad = results.filter((r) => !r.ok && !r.soft)
 const softBad = results.filter((r) => !r.ok && r.soft)
 
@@ -350,18 +439,19 @@ if (softBad.length > 0) {
   console.log(`[check-links] ⚠ egtype依存(soft) ${softBad.length}/${softTargets.length} 件が未到達 — egtype 本番デプロイ待ちなら想定内(portal と egtype はセットでデプロイ)。デプロイ後は --strict で厳格確認。`)
 }
 
-const fatal = hardBad.length > 0 || localMissing.length > 0 || (STRICT && softBad.length > 0)
+const fatal = hardBad.length > 0 || localMissing.length > 0 || ogBadType.length > 0 || (STRICT && softBad.length > 0)
+const ogOkLabel = `OG配信 ${ogResults.filter((r) => r.verdict === 'ok').length}/${ogRoutes.length}件が image/*`
 if (!fatal && hardBad.length === 0 && softBad.length === 0) {
-  console.log(`[check-links] ✓ 全${results.length}件 OK / ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合`)
+  console.log(`[check-links] ✓ 全${results.length}件 OK / ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合 / ${ogOkLabel}`)
   process.exit(0)
 } else if (!fatal) {
   // 「portal自前 N/N」の N は **portal 自身がデプロイする分だけ** を数える(Day101)。
   // 従来は分母に egtype 配信の33件(キャラ画像32 + /egtype/)が混ざっており、hard で通った
   // 件数をそのまま「自前」と称していた＝集計の嘘だった。PM で外部リンクも分けた(hard では
   // あるが portal 自前ではない。混ぜると同じ嘘の作り直しになる)。
-  console.log(`[check-links] ✓ portal自前 ${portalTargets.length}/${portalTargets.length} 件 + 外部 ${externalTargets.length}件 OK（egtype配信 soft ${softTargets.length}件中 ${softBad.length}件未到達＝警告のみ）/ ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合`)
+  console.log(`[check-links] ✓ portal自前 ${portalTargets.length}/${portalTargets.length} 件 + 外部 ${externalTargets.length}件 OK（egtype配信 soft ${softTargets.length}件中 ${softBad.length}件未到達＝警告のみ）/ ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合 / ${ogOkLabel}`)
   process.exit(0)
 } else {
-  console.log(`[check-links] ✗ 致命 ${hardBad.length}件${localMissing.length ? ` + ローカル静的欠落 ${localMissing.length}件` : ''}${STRICT ? ` + soft ${softBad.length}件` : ''} / 全${results.length}件`)
+  console.log(`[check-links] ✗ 致命 ${hardBad.length}件${localMissing.length ? ` + ローカル静的欠落 ${localMissing.length}件` : ''}${ogBadType.length ? ` + OG配信の型なし ${ogBadType.length}件` : ''}${STRICT ? ` + soft ${softBad.length}件` : ''} / 全${results.length}件`)
   process.exit(1)
 }
