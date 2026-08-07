@@ -379,3 +379,92 @@ export function classifyOgDelivery({ status, contentType }) {
   if (status === 404) return 'pending-deploy'
   return 'unreachable'
 }
+
+// --- sitemap.xml の網羅性(Day107) ---
+// 実測: `public/sitemap.xml` は手書きの静的ファイルで `/`・`/stamps/`・`/egtype/` の3件しか
+// 載せていないが、`/noxa/` は **canonical と専用 OG 画像まで持つ索引対象の実ルート**(本番 200)。
+// sitemap を作った後に増えたページが誰にも気づかれず落ちたまま、`/stamps/` だけが手で追記
+// されていた＝手書き運用は既に一度失敗している。HTTP 検査は全ルートが 200 を返すので
+// 死活監視には一生映らず、Day97(無リンクの実ルート)・Day104(索引制御)と同じ
+// 「200 が返るせいで見えない索引の穴」。
+//
+// 判定は3方向。どれか一方向だけだと逆向きの嘘が残る:
+//   missing       … 索引対象の実ルートなのに sitemap に無い(＝本 Day が直した欠陥そのもの)
+//   stale         … sitemap に居るが実ルートでない(消したページを載せ続ける＝404 を索引へ差し出す)
+//   contradictory … noindex を宣言しているのに sitemap に載せている(自己矛盾。クローラへ
+//                   「索引するな」と「索引しろ」を同時に渡す)
+// cross-repo 領域(既定 /egtype/)は別リポの配信物で app/ に page を持たないため stale から除く。
+const SITEMAP_LOC_RE = /<loc>\s*([^<\s]+)\s*<\/loc>/g
+
+/**
+ * @param routeEntries [{ route: '/noxa/', src: 'そのルートの page/layout を連結したソース' }]
+ * @param sitemapXml   public/sitemap.xml の中身
+ * @param origin       自サイトの origin(末尾スラッシュ無し)。metadataBase から導いたもの。
+ * @param crossRepoPrefixes stale 判定から除外する別リポ配信の接頭辞
+ */
+export function findSitemapCoverageGaps(routeEntries, sitemapXml, origin, crossRepoPrefixes = CROSS_REPO_PREFIXES) {
+  const locs = [...sitemapXml.matchAll(SITEMAP_LOC_RE)].map((m) => m[1])
+  // 自オリジンの loc だけをルートへ還元する。別オリジンの loc は portal のルート集合と
+  // 突合できない(＝stale 判定の対象外)ので、そのまま素通りさせる。
+  const ownPaths = new Set(
+    locs.filter((u) => u === origin || u.startsWith(`${origin}/`))
+      .map((u) => normalizeRoutePath(u.slice(origin.length) || '/')),
+  )
+  const known = new Set(routeEntries.map((e) => e.route))
+  const missing = []
+  const contradictory = []
+  for (const { route, src } of routeEntries) {
+    const noindex = NOINDEX_RE.test(src)
+    if (noindex && ownPaths.has(route)) contradictory.push(route)
+    if (!noindex && !ownPaths.has(route)) missing.push(route)
+  }
+  const stale = [...ownPaths]
+    .filter((p) => !known.has(p))
+    .filter((p) => !crossRepoPrefixes.some((pre) => p.startsWith(pre)))
+  return { missing, stale, contradictory, locCount: locs.length }
+}
+
+// --- Service Worker ブートストラップの巻き添え(Day107) ---
+// 実測: `app/layout.tsx` の SW ブートストラップは
+//   getRegistrations().then(rs => Promise.all(rs.map(r => r.unregister())))
+//     .then(() => caches.keys().then(ks => Promise.all(ks.map(k => caches.delete(k)))))
+//     .then(() => register('/sw.js'))
+// だった。`getRegistrations()` は**スコープに関係なくオリジン全体の登録**を返し、`caches.keys()` も
+// **オリジン全体の Cache Storage** を返す。egshugy.com には子アプリが同居していて
+// `/egtype/sw.js`(egtype の index.html が実際に register している)・`/pekarin-chinchiro/sw.js`・
+// `/word-wolf/sw.js`・`/kingscup/sw.js` がいずれも本番 200。つまり **ポータルのトップを開くたびに
+// 子アプリ全部の SW 登録とプリキャッシュが毎回消える**(オフライン能力の喪失＋再訪のたびに全再取得)。
+// ポータル⇄子アプリは相互リンクなので通常動線でそのまま踏む。元は yorulog の SW 汚染端末の救済
+// だったが、救済の副作用が**汚染の無い平常時にも常時**効いていた。
+//
+// 修正後の不変条件は「無条件の全消しをしないこと」の2点:
+//   ①登録の列挙結果を絞らずに unregister へ流さない(スコープ or scriptURL で自分の領分に限定する)
+//   ②caches.keys() の結果を絞らずに delete へ流さない
+// HTTP 検査では何も起きない(全ルートが 200)ので、退行してもガードが無ければ永久に無検知。
+const SW_ENUM_RE = /getRegistrations\s*\(\s*\)/
+const SW_CACHE_KEYS_RE = /caches\s*\.\s*keys\s*\(\s*\)/
+// 列挙結果 rs を .filter を通さずそのまま .map(r => r.unregister()) へ渡している形。
+const SW_UNFILTERED_UNREGISTER_RE = /getRegistrations\s*\(\s*\)[\s\S]{0,200}?\.then\s*\(\s*(?:\(\s*)?([A-Za-z_$][\w$]*)\s*\)?\s*=>[\s\S]{0,200}?\1\s*\.\s*map\s*\(/
+// キー列挙 ks を .filter を通さずそのまま .map(k => caches.delete(k)) へ渡している形。
+const SW_UNFILTERED_CACHE_DELETE_RE = /caches\s*\.\s*keys\s*\(\s*\)[\s\S]{0,200}?\.then\s*\(\s*(?:\(\s*)?([A-Za-z_$][\w$]*)\s*\)?\s*=>[\s\S]{0,200}?\1\s*\.\s*map\s*\(/
+
+/**
+ * SW ブートストラップが「オリジン全体を無条件に巻き込む」形に退行していないか。
+ * @returns { offenders: [{kind, why}], scanned } scanned は SW を触るソースの数(母集団 floor 用)
+ */
+export function findOriginWideSwWipes(entries) {
+  const offenders = []
+  let scanned = 0
+  for (const { file, src } of entries) {
+    const touchesSw = SW_ENUM_RE.test(src) || SW_CACHE_KEYS_RE.test(src)
+    if (!touchesSw) continue
+    scanned++
+    if (SW_UNFILTERED_UNREGISTER_RE.test(src)) {
+      offenders.push({ file, kind: 'SW登録', why: 'getRegistrations() の結果を絞らず全件 unregister している（同一オリジンの子アプリ /egtype/ 等の SW まで毎回消える）' })
+    }
+    if (SW_UNFILTERED_CACHE_DELETE_RE.test(src)) {
+      offenders.push({ file, kind: 'キャッシュ', why: 'caches.keys() の結果を絞らず全件 delete している（子アプリのプリキャッシュまで毎回消える）' })
+    }
+  }
+  return { offenders, scanned }
+}

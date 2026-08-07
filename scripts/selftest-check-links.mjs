@@ -25,7 +25,7 @@ import { fetchWithRetry, isTransientStatus } from './fetch-with-retry.mjs'
 // ための逃がし弁で、従来はカテゴリごとの手書きリテラルだったため実際の配信主体とずれていた
 // (同じ /egtype/ 依存で画像は hard・型ページは soft)。URL 由来の述語に変えた分、今度は
 // 「接頭辞を広げれば自前のリンク切れまで警告のみにできる」経路が生まれるので、そこも押さえる。
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, ogImageRoutesFromFiles, classifyOgDelivery } from './lib/extract-targets.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes } from './lib/extract-targets.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -676,6 +676,132 @@ function walkRel(dir, prefix = '') {
 
   fs.rmSync(fixtures, { recursive: true, force: true })
 }
+
+// ㊸ sitemap.xml の網羅性(Day107・純関数)。手書きの静的 sitemap は増えたページを取りこぼしても
+//   全ルートが 200 を返すので死活監視に一生映らない(実測: `/noxa/` が丸ごと欠落)。
+//   missing/stale/contradictory の3方向を押さえる。片方向だけだと逆向きの嘘が残る。
+{
+  const O = 'https://x.test'
+  const xml = (paths) => `<urlset>${paths.map((p) => `<loc>${O}${p}</loc>`).join('')}</urlset>`
+  const noindex = 'export const metadata = { robots: { index: false, follow: true } }'
+  const plain = 'export default function P() {}'
+
+  const a = findSitemapCoverageGaps(
+    [{ route: '/', src: plain }, { route: '/noxa/', src: plain }], xml(['/']), O)
+  if (a.missing.join() === '/noxa/' && a.stale.length === 0 && a.contradictory.length === 0) {
+    ok('sitemap: 索引対象の実ルートが未掲載なら missing で指摘(本 Day が直した欠陥そのもの)')
+  } else bad(`missing 判定が想定外: ${JSON.stringify(a)}`)
+
+  const b = findSitemapCoverageGaps([{ route: '/', src: plain }], xml(['/', '/gone/']), O)
+  if (b.stale.join() === '/gone/' && b.missing.length === 0) {
+    ok('sitemap: 実ルートの無い loc は stale で指摘(消えたURLを索引へ差し出さない)')
+  } else bad(`stale 判定が想定外: ${JSON.stringify(b)}`)
+
+  const c = findSitemapCoverageGaps(
+    [{ route: '/', src: plain }, { route: '/workspaces/', src: noindex }], xml(['/', '/workspaces/']), O)
+  if (c.contradictory.join() === '/workspaces/' && c.missing.length === 0) {
+    ok('sitemap: noindex なのに掲載されていれば contradictory で指摘(索引するな/しろの同時申告)')
+  } else bad(`contradictory 判定が想定外: ${JSON.stringify(c)}`)
+
+  // noindex ルートは「載っていないのが正解」＝missing に数えない(/workspaces/ が実例)。
+  const d = findSitemapCoverageGaps(
+    [{ route: '/', src: plain }, { route: '/workspaces/', src: noindex }], xml(['/']), O)
+  if (d.missing.length === 0 && d.stale.length === 0 && d.contradictory.length === 0) {
+    ok('sitemap: noindex ルートの非掲載は正常(救済スタブで false-red を出さない)')
+  } else bad(`noindex ルートで誤検知: ${JSON.stringify(d)}`)
+
+  // 別リポ配信(/egtype/)は app/ に page を持たないので stale から除く。ここを外すと
+  // portal 単体では絶対に解消できない指摘で cron が毎日 red になる。
+  const e = findSitemapCoverageGaps([{ route: '/', src: plain }], xml(['/', '/egtype/']), O, ['/egtype/'])
+  if (e.stale.length === 0) ok('sitemap: 別リポ配信の接頭辞(/egtype/)は stale から除外する')
+  else bad(`cross-repo 除外が効いていない: ${JSON.stringify(e)}`)
+
+  // 別オリジンの loc は portal のルート集合と突合できない＝巻き込まない。
+  const f = findSitemapCoverageGaps([{ route: '/', src: plain }], xml(['/']).replace('</urlset>', '<loc>https://other.test/z/</loc></urlset>'), O)
+  if (f.stale.length === 0) ok('sitemap: 別オリジンの loc は突合対象外(誤って stale にしない)')
+  else bad(`別オリジンを巻き込んだ: ${JSON.stringify(f)}`)
+
+  // floor の母集団: <loc> を1件も読めない＝書式変更でガードが無言化した状態を数えられること。
+  if (findSitemapCoverageGaps([{ route: '/', src: plain }], '<urlset></urlset>', O).locCount === 0) {
+    ok('sitemap: <loc> の件数を数えている(0件を致命化する floor の根拠)')
+  } else bad('locCount が想定外')
+}
+
+// ㊹ SW ブートストラップの巻き添え(Day107・純関数)。getRegistrations()/caches.keys() は
+//   **スコープ無関係にオリジン全体**を返すため、絞らず全件 unregister/delete すると同居する
+//   子アプリ(/egtype/ 等)の SW とプリキャッシュまで毎回消える。HTTP は 200 のままなので無検知。
+{
+  const wipeAll = "navigator.serviceWorker.getRegistrations().then(rs=>Promise.all(rs.map(r=>r.unregister()))).then(()=>caches.keys().then(ks=>Promise.all(ks.map(k=>caches.delete(k)))))"
+  const scoped = "navigator.serviceWorker.getRegistrations().then(function(rs){var bad=rs.filter(function(r){return r.scope===R});return Promise.all(bad.map(function(r){return r.unregister()})).then(function(){return bad.length?caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k.indexOf('portal')===0}).map(function(k){return caches.delete(k)}))}):null})})"
+
+  const w = findOriginWideSwWipes([{ file: 'layout.tsx', src: wipeAll }])
+  if (w.offenders.length === 2 && w.scanned === 1) {
+    ok('SW: 絞り込み無しの全件 unregister と全件 caches.delete を2件とも指摘(修正前の実装形)')
+  } else bad(`巻き添え判定が想定外: ${JSON.stringify(w)}`)
+
+  const g = findOriginWideSwWipes([{ file: 'layout.tsx', src: scoped }])
+  if (g.offenders.length === 0 && g.scanned === 1) {
+    ok('SW: filter を挟んだ形(本 Day の実装)は指摘しない(false-red を出さない)')
+  } else bad(`修正形を誤検知: ${JSON.stringify(g)}`)
+
+  // 母集団 floor: SW を触るソースが1件も無い＝ブートストラップ消失 or 記法変更。
+  if (findOriginWideSwWipes([{ file: 'page.tsx', src: 'export default function P() {}' }]).scanned === 0) {
+    ok('SW: 走査した母集団(scanned)を数えている(0件を致命化する floor の根拠)')
+  } else bad('SW の scanned が想定外')
+}
+
+// ㊺ 配線(Day107): 純関数が正しくても本体が致命化していなければ何も守れない。
+//   LINKS_SITEMAP_DIR / LINKS_SITEMAP / LINKS_SW_DIR の非破壊 override でフィクスチャを見せる。
+//   --list なので実ネットワークは発生しない(両検査とも fetch より前段)。
+{
+  const fx = fs.mkdtempSync(path.join(os.tmpdir(), 'links-d107-'))
+  const write = (rel, src) => {
+    const full = path.join(fx, rel)
+    fs.mkdirSync(path.dirname(full), { recursive: true })
+    fs.writeFileSync(full, src)
+  }
+  const run = (env) => spawnSync(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--list'],
+    { encoding: 'utf8', env: { ...process.env, ...env } })
+  const ORIGIN = 'https://egshugy.com'  // 正本 app/layout.tsx の metadataBase
+
+  // (a) 索引対象の実ルートが sitemap に無ければ致命。
+  write('a/page.tsx', 'export default function P() {}')
+  write('a/newpage/page.tsx', 'export default function P() {}')
+  write('sm-a.xml', `<urlset><loc>${ORIGIN}/</loc></urlset>`)
+  const ra = run({ LINKS_SITEMAP_DIR: path.join(fx, 'a'), LINKS_SITEMAP: path.join(fx, 'sm-a.xml') })
+  if (ra.status === 1 && /不整合.*\[sitemap\] \/newpage\//.test(ra.stdout)) {
+    ok('配線: sitemap 未掲載の実ルートで exit 1(sitemap ガードが本体に届いている)')
+  } else bad(`sitemap ガードが本体で効いていない: status=${ra.status}`)
+
+  // (b) <loc> が1件も読めなければ致命(floor)。0件は必ず「差分なし」に見えるため。
+  write('sm-b.xml', '<urlset></urlset>')
+  const rb = run({ LINKS_SITEMAP_DIR: path.join(fx, 'a'), LINKS_SITEMAP: path.join(fx, 'sm-b.xml') })
+  if (rb.status === 1 && /<loc> を1件も抽出できない/.test(rb.stdout)) ok('配線: sitemap の loc 0件を致命化する floor が効いている')
+  else bad(`sitemap floor が効いていない: status=${rb.status}`)
+
+  // (c) SW ブートストラップがオリジン全体を巻き込む形へ戻れば致命(＝本 Day の修正の巻き戻し)。
+  write('sw/page.tsx', 'export default function P() {}')
+  write('sw/layout.tsx', "const s = `navigator.serviceWorker.getRegistrations().then(rs=>Promise.all(rs.map(r=>r.unregister()))).then(()=>caches.keys().then(ks=>Promise.all(ks.map(k=>caches.delete(k)))))`")
+  const rc = run({ LINKS_SW_DIR: path.join(fx, 'sw') })
+  if (rc.status === 1 && /巻き添え.*SW\/SW登録/.test(rc.stdout)) ok('配線: オリジン全体を巻き込む SW ブートストラップで exit 1')
+  else bad(`SW ガードが本体で効いていない: status=${rc.status}`)
+
+  // (d) SW を触るソースが消えれば致命(floor)。/sw.js が二度と登録されない状態でもある。
+  write('nosw/page.tsx', 'export default function P() {}')
+  const rd = run({ LINKS_SW_DIR: path.join(fx, 'nosw') })
+  if (rd.status === 1 && /SW 登録\/キャッシュを触るソースが1件も無い/.test(rd.stdout)) ok('配線: SW 母集団0件を致命化する floor が効いている')
+  else bad(`SW floor が効いていない: status=${rd.status}`)
+
+  // (e) 負のサニティ: 正本(app/ + public/sitemap.xml)は両ガードとも素通りすること。
+  //     ここを見ないと (a)〜(d) は「常に落ちる実装」でも全部通る。
+  const re_ = spawnSync(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--list'], { encoding: 'utf8' })
+  if (re_.status === 0 && !/\[sitemap\]/.test(re_.stdout) && !/\[SW\//.test(re_.stdout)) {
+    ok('配線: 正本 app/ + public/sitemap.xml は sitemap/SW ガードとも素通りする')
+  } else bad(`正本で新ガードが誤検知: status=${re_.status}`)
+
+  fs.rmSync(fx, { recursive: true, force: true })
+}
+
 
 console.log(`\n[selftest-check-links] 結果: pass=${pass} fail=${fail}`)
 process.exit(fail === 0 ? 0 : 1)

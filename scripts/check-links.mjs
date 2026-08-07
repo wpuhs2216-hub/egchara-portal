@@ -14,7 +14,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fetchWithRetry } from './fetch-with-retry.mjs'
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, CROSS_REPO_PREFIXES, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, ogImageRoutesFromFiles, classifyOgDelivery } from './lib/extract-targets.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, CROSS_REPO_PREFIXES, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes } from './lib/extract-targets.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -305,6 +305,36 @@ if (a11yOffenders.length > 0) {
   }
 }
 
+
+
+// --- SW ブートストラップがオリジン全体を巻き込んでいないか(Day107) ---
+// 実測: app/layout.tsx の SW ブートストラップが getRegistrations()/caches.keys() の結果を
+// 絞らず全件解除・全件削除していた。両 API は**スコープ無関係にオリジン全体**を返すため、
+// 同居する子アプリ(/egtype/sw.js は egtype が実際に register 済み・/pekarin-chinchiro/・
+// /word-wolf/・/kingscup/ も本番 200)の SW とプリキャッシュが、ポータルを開くたびに全部消えていた。
+// 相互リンクなので通常動線でそのまま踏む。HTTP 検査では全ルートが 200 なので永久に無検知。
+// LINKS_SW_DIR は selftest 用の非破壊 override(上と同じ理由で LINKS_APP_DIR とは別の口)。
+{
+  const SW_DIR = process.env.LINKS_SW_DIR ? path.resolve(process.env.LINKS_SW_DIR) : path.join(ROOT, 'app')
+  const swEntries = collectPageFiles(SW_DIR)
+    .filter((f) => /\.tsx?$/.test(f))
+    .map((f) => ({ file: f, src: fs.readFileSync(path.join(SW_DIR, f), 'utf8') }))
+  const { offenders: swOffenders, scanned: swScanned } = findOriginWideSwWipes(swEntries)
+  // 母集団0件の floor(Day91 と同型)。SW を触るソースが1件も無い＝ブートストラップが消えた
+  // (＝/sw.js が二度と登録されない)か、記法が変わって走査が空振りしたかのどちらかで、
+  // どちらも「✓ 問題なし」と出続けてよい状態ではない。
+  if (swScanned === 0) {
+    console.log('  ✗ 抽出失敗 [SW] app/ に SW 登録/キャッシュを触るソースが1件も無い')
+    console.log('[check-links] ✗ 致命: SW ブートストラップの母集団が0件（記法変更でガードが無言化した、または登録自体が消えた可能性）。scripts/lib/extract-targets.mjs の findOriginWideSwWipes を確認すること。')
+    process.exit(1)
+  }
+  if (swOffenders.length > 0) {
+    for (const o of swOffenders) console.log(`  ✗ 巻き添え  [SW/${o.kind}] app/${o.file}: ${o.why}`)
+    console.log(`[check-links] ✗ 致命: SW ブートストラップがオリジン全体を無条件に巻き込んでいる ${swOffenders.length}件（同居する子アプリのオフライン能力を毎回破壊する）。`)
+    process.exit(1)
+  }
+}
+
 const STRICT = process.argv.includes('--strict')
 // hard/soft は **どの配列から来たか** ではなく **URL がどこから配信されるか** で決める(Day101)。
 // 従来はカテゴリごとの手書きリテラルで、同じ egtype デプロイ依存でありながら
@@ -382,6 +412,59 @@ if (misclassified.length > 0) {
   for (const { t, why } of misclassified) console.log(`  ✗ 分類異常 [${t.cat}] ${t.url} は ${why}`)
   console.log(`[check-links] ✗ 致命: 配信主体の分類が実態（${crossRepoRoot} ＝ロスター由来の配信領域）と ${misclassified.length}件ずれている。scripts/lib/extract-targets.mjs の CROSS_REPO_PREFIXES と環境変数 LINKS_CROSS_REPO_PREFIXES を確認すること。`)
   process.exit(1)
+}
+
+// 配置(Day107): この段は hard/soft の分類floor **より後**。sitemap の stale 判定は
+// crossPrefixes(別リポ配信の領域)を共有するので、分類の宣言が壊れている状態で先に走ると
+// 「分類が壊れている」ことを sitemap 側のエラーが覆い隠す（落ちる事実は同じでも原因が読めない）。
+// --- sitemap.xml が実ルートを網羅しているか(Day107) ---
+// public/sitemap.xml は手書きの静的ファイルで、ページを増やしても誰も更新を強制しない。
+// 実測で `/noxa/`(canonical と専用 OG 画像を持つ索引対象の実ルート・本番 200)が丸ごと
+// 欠落していた。全ルートが 200 を返すので HTTP 検査には一生映らない＝Day97 の「無リンクの
+// 実ルートが無監視」と同じ構図の索引版。missing/stale/contradictory の3方向で突合する
+// (片方向だけだと逆向きの嘘＝消したページを載せ続ける・noindex を載せる、が残る)。
+// LINKS_SITEMAP_DIR / LINKS_SITEMAP は selftest がフィクスチャを見せるための非破壊 override。
+// LINKS_APP_DIR とは**別の口**にする(LINKS_SELFURL_DIR と同じ作法): 各ガードのフィクスチャが
+// 他のガードの母集団まで差し替えてしまうと、1つのフィクスチャで無関係なガードが落ちて
+// 「どのガードを固定したのか」が曖昧になる。
+{
+  const SITEMAP_DIR = process.env.LINKS_SITEMAP_DIR ? path.resolve(process.env.LINKS_SITEMAP_DIR) : path.join(ROOT, 'app')
+  const SITEMAP_PATH = process.env.LINKS_SITEMAP ? path.resolve(process.env.LINKS_SITEMAP) : path.join(ROOT, 'public/sitemap.xml')
+  const sitemapXml = fs.readFileSync(SITEMAP_PATH, 'utf8')
+  const sitemapFiles = collectPageFiles(SITEMAP_DIR)
+  // ルートごとに、そのルートの page/layout を連結したソースを渡す(noindex 宣言はここに出る)。
+  const srcByRoute = new Map()
+  for (const f of sitemapFiles.filter((f) => f.endsWith('.tsx'))) {
+    const parts = f.split('/')
+    parts.pop()
+    const route = `/${parts.length ? `${parts.join('/')}/` : ''}`
+    srcByRoute.set(route, (srcByRoute.get(route) ?? '') + fs.readFileSync(path.join(SITEMAP_DIR, f), 'utf8'))
+  }
+  const { routes: sitemapRoutes } = routesFromPageFiles(sitemapFiles)
+  const routeEntries = sitemapRoutes.map((route) => ({ route, src: srcByRoute.get(route) ?? '' }))
+  // 母集団0件の floor(Day91 と同型)。実ルートが0件、または loc が1件も読めない場合、
+  // 突合は必ず「差分なし」になり「✓ 網羅」と出たままガードが無言で消える。
+  if (routeEntries.length === 0) {
+    console.log('  ✗ 抽出失敗 [sitemap] app/ から実ルートを1件も導けない')
+    console.log('[check-links] ✗ 致命: sitemap 突合の母集団が0件（ルート規約の変更でガードが無言化した可能性）。')
+    process.exit(1)
+  }
+  const { missing, stale, contradictory, locCount } = findSitemapCoverageGaps(routeEntries, sitemapXml, selfOrigin, crossPrefixes)
+  if (locCount === 0) {
+    console.log(`  ✗ 抽出失敗 [sitemap] ${path.relative(ROOT, SITEMAP_PATH)} から <loc> を1件も抽出できない`)
+    console.log('[check-links] ✗ 致命: sitemap の <loc> が0件（書式変更でガードが無言化した可能性）。')
+    process.exit(1)
+  }
+  const sitemapOffenders = [
+    ...missing.map((r) => ({ r, why: '索引対象の実ルートなのに sitemap に載っていない(検索エンジンへ申告されない)' })),
+    ...stale.map((r) => ({ r, why: 'sitemap に載っているが app/ に実ルートが無い(消えたURLを索引へ差し出している)' })),
+    ...contradictory.map((r) => ({ r, why: 'noindex を宣言しているのに sitemap に載っている(索引するな/しろを同時に渡している)' })),
+  ]
+  if (sitemapOffenders.length > 0) {
+    for (const { r, why } of sitemapOffenders) console.log(`  ✗ 不整合  [sitemap] ${r}: ${why}`)
+    console.log(`[check-links] ✗ 致命: sitemap.xml と実ルートの不整合 ${sitemapOffenders.length}件（全ルートが 200 を返すため HTTP 検査では検知できない）。`)
+    process.exit(1)
+  }
 }
 
 console.log(`[check-links] base=${BASE} 内部${internal.length}(featured-apps=${featuredLive ? 'live' : 'dead:除外'} / 実ルート${appRoutes.length}・うち無リンク${unlinkedRoutes.length}) + キャラ画像${charImages.length} + キャラ型頁${charPages.length} + 外部${externals.length} = ${targets.length}件（hard: portal自前${portalTargets.length} + 外部${externalTargets.length} / soft: egtype配信${softTargets.length}）${dupCount ? `(重複${dupCount}件を排除)` : ''}${STRICT ? ' [strict]' : ''}`)
