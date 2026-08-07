@@ -11,7 +11,8 @@
     "start": "next start",
     "check-links": "node scripts/check-links.mjs",
     "check-egtype-parity": "node scripts/check-egtype-parity.mjs",
-    "check-uptime": "node scripts/check-uptime.mjs"
+    "check-uptime": "node scripts/check-uptime.mjs",
+    "postbuild": "node scripts/postbuild-og-ext.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
