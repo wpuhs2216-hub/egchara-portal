@@ -26,6 +26,12 @@ import { fetchWithRetry, isTransientStatus } from './fetch-with-retry.mjs'
 // (同じ /egtype/ 依存で画像は hard・型ページは soft)。URL 由来の述語に変えた分、今度は
 // 「接頭辞を広げれば自前のリンク切れまで警告のみにできる」経路が生まれるので、そこも押さえる。
 import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes } from './lib/extract-targets.mjs'
+//
+// 追加(Day110): SW の後片付けを「書き方」ではなく「**実際に何を消したか**」で固定する。
+// Day107 の静的規則は `caches.keys()` の結果を絞らず delete する形を黒としたが、実害として
+// 残っていたのは `keys.filter((k) => k !== CACHE_NAME)` ＝ filter はあるのに他人のものを
+// 全部消す反転形で、規則の上では白だった。SW は素の JS なので実走できる。
+import { simulateSwActivate, ownPrefixOf } from './lib/sw-activate-sim.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -798,6 +804,114 @@ function walkRel(dir, prefix = '') {
   if (re_.status === 0 && !/\[sitemap\]/.test(re_.stdout) && !/\[SW\//.test(re_.stdout)) {
     ok('配線: 正本 app/ + public/sitemap.xml は sitemap/SW ガードとも素通りする')
   } else bad(`正本で新ガードが誤検知: status=${re_.status}`)
+
+  fs.rmSync(fx, { recursive: true, force: true })
+}
+
+// ㊻ SW の後片付けを実走で固定する(Day110・純関数)。
+//   Cache Storage は**オリジン単位で共有**される。egshugy.com には子アプリが同居しており、
+//   「自分の現行キャッシュ以外を消す」は絞り込みではなく**他アプリの全消し**そのもの。
+{
+  // 実走用の最小 SW。fetch は「自分のキャッシュ名を名乗る」ためだけに必要(所有判定の実測源)。
+  const swSrc = (activateFilter, cacheName = "`${CACHE_PREFIX}v1`") => `
+const CACHE_PREFIX = 'portal-'
+const CACHE_NAME = ${cacheName}
+self.addEventListener('activate', (event) => {
+  event.waitUntil(caches.keys().then((keys) =>
+    Promise.all(keys.filter((key) => ${activateFilter}).map((key) => caches.delete(key)))).then(() => self.clients.claim()))
+})
+self.addEventListener('fetch', (event) => {
+  event.respondWith(fetch(event.request).then((r) => {
+    const c = r.clone(); caches.open(CACHE_NAME).then((x) => x.put(event.request, c)).catch(() => {}); return r
+  }).catch(() => caches.match(event.request)))
+})`
+  const O = 'https://egshugy.com'
+  const FOREIGN = ['egtype-vX', 'pekarin-chinchiro-vX', 'word-wolf-vX', 'kingscup-vX']
+  const sim = (src) => simulateSwActivate(src, { origin: O, foreignKeys: FOREIGN })
+
+  // (a) 修正前の形。filter はあるが「自分の現行以外」＝同居アプリを全部消す。
+  const a = await sim(swSrc('key !== CACHE_NAME'))
+  if (a.foreignDeleted.length === FOREIGN.length) {
+    ok('SW実走: 「現行以外を全消し」は同居アプリのキャッシュを全件削除する(修正前の実害を実測で再現)')
+  } else bad(`巻き添えを再現できない: ${JSON.stringify(a)}`)
+
+  // (b) 本 Day の修正形。自分の旧版だけ消し、他アプリには触らない。
+  const b = await sim(swSrc('key.startsWith(CACHE_PREFIX) && key !== CACHE_NAME'))
+  if (b.foreignDeleted.length === 0 && b.deleted.includes(b.ownStaleKey)) {
+    ok('SW実走: 所有接頭辞で絞れば他アプリは無傷・自分の旧版だけ消える(修正形)')
+  } else bad(`修正形の実走が想定外: ${JSON.stringify(b)}`)
+
+  // (c) 下限。何も消さない no-op へ退化しても「他人を消していない」は満たされるので、
+  //     自分の旧版を消せることまで要求しないとガードが空洞になる。
+  const c = await sim(swSrc('false'))
+  if (c.foreignDeleted.length === 0 && !c.deleted.includes(c.ownStaleKey)) {
+    ok('SW実走: no-op へ退化した activate を「旧版を消さない」として区別できる(空洞化の下限)')
+  } else bad(`no-op 退化を区別できない: ${JSON.stringify(c)}`)
+
+  // (d) 所有判定は**ソースを読まず** fetch の保存先から実測する＝定数名や記法に依存しない。
+  const d = await sim(swSrc('key.startsWith(CACHE_PREFIX) && key !== CACHE_NAME').replace(/CACHE_PREFIX/g, 'P').replace(/CACHE_NAME/g, 'N'))
+  if (d.cacheName === 'portal-v1' && d.ownPrefix === 'portal-' && d.foreignDeleted.length === 0) {
+    ok('SW実走: 自分のキャッシュ名を caches.open() の実測で特定する(識別子を変えても追随する)')
+  } else bad(`所有判定が実測になっていない: ${JSON.stringify(d)}`)
+
+  // (e) 区切りの無い名前は所有が判定不能＝安全な後片付けが原理的に書けない。
+  if (ownPrefixOf('portal-v1') === 'portal-' && ownPrefixOf('portalv1') === null && ownPrefixOf('-v1') === null) {
+    ok('SW実走: 接頭辞の区切りが無いキャッシュ名を「所有判定不能」として弾く')
+  } else bad(`ownPrefixOf が想定外: ${ownPrefixOf('portalv1')}`)
+
+  // (f) 母集団 floor: activate / fetch が消えれば検査は空振りする。その状態を数えられること。
+  const f = await sim("self.addEventListener('install', () => self.skipWaiting())")
+  if (f.hasActivate === false && f.hasFetch === false && f.cacheName === null) {
+    ok('SW実走: activate/fetch の有無を数えている(0件を致命化する floor の根拠)')
+  } else bad(`floor の根拠が取れていない: ${JSON.stringify(f)}`)
+}
+
+// ㊼ SW 実走ガードの配線(Day110)。純関数が正しくても本体が致命化していなければ何も守れない。
+//   LINKS_SW_FILE の非破壊 override でフィクスチャを見せる(--list なので実ネットワーク無し)。
+{
+  const fx = fs.mkdtempSync(path.join(os.tmpdir(), 'links-d110-'))
+  const swFile = (name, src) => { const p = path.join(fx, name); fs.writeFileSync(p, src); return p }
+  const run = (env) => spawnSync(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--list'],
+    { encoding: 'utf8', env: { ...process.env, ...env } })
+  const base = fs.readFileSync(path.join(__dirname, '..', 'public/sw.js'), 'utf8')
+
+  // (a) 静的規則: 反転形(現行以外を全消し)は書き方の段で捕まる＝Day107 の規則の穴を塞いだ分。
+  const ra = run({ LINKS_SW_FILE: swFile('inverted.js', base.replace('key.startsWith(CACHE_PREFIX) && key !== CACHE_NAME', 'key !== CACHE_NAME')) })
+  if (ra.status === 1 && /巻き添え.*SW\/キャッシュ.*現行キャッシュ以外/.test(ra.stdout)) {
+    ok('配線: 「現行以外を全消し」の反転形で exit 1(Day107 の静的規則が白と読んでいた形)')
+  } else bad(`反転形の静的検知が本体で効いていない: status=${ra.status}`)
+
+  // (b) 実走ガード: 静的規則が原理的に見抜けない形(filter のコールバックを変数へ切り出す)。
+  //     ここが落ちないなら実走ガードは静的規則の重複でしかなく、置く意味が無い。
+  const indirect = base
+    .replace('const CACHE_NAME = `${CACHE_PREFIX}v1`', 'const CACHE_NAME = `${CACHE_PREFIX}v1`\nconst isStale = (key) => key !== CACHE_NAME')
+    .replace('.filter((key) => key.startsWith(CACHE_PREFIX) && key !== CACHE_NAME)', '.filter(isStale)')
+  const rb = run({ LINKS_SW_FILE: swFile('indirect.js', indirect) })
+  if (rb.status === 1 && /SW実走.*同居アプリのキャッシュを削除/.test(rb.stdout)) {
+    ok('配線: 静的規則では見抜けない間接形(filter を変数へ)を実走ガードが捕まえる')
+  } else bad(`実走ガードが本体で効いていない: status=${rb.status} / ${rb.stdout.slice(-400)}`)
+
+  // (c) 下限の配線: no-op 退化で exit 1。
+  const rc = run({ LINKS_SW_FILE: swFile('noop.js', base.replace('key.startsWith(CACHE_PREFIX) && key !== CACHE_NAME', 'false')) })
+  if (rc.status === 1 && /SW実走.*旧版キャッシュ.*消さない/.test(rc.stdout)) ok('配線: activate の no-op 退化で exit 1(後片付けの下限)')
+  else bad(`no-op 下限が本体で効いていない: status=${rc.status}`)
+
+  // (d) 所有判定不能(接頭辞の区切り無し)で exit 1。
+  const rd = run({ LINKS_SW_FILE: swFile('noprefix.js', base.replace("const CACHE_PREFIX = 'portal-'", "const CACHE_PREFIX = ''").replace('`${CACHE_PREFIX}v1`', "'portalv1'")) })
+  if (rd.status === 1 && /SW実走.*接頭辞の区切りが無い/.test(rd.stdout)) ok('配線: 所有を名前で判定できないキャッシュ名で exit 1')
+  else bad(`所有判定 floor が本体で効いていない: status=${rd.status}`)
+
+  // (e) SW 本体が消えれば exit 1(配信されている /sw.js の実体が無くなった状態)。
+  const re_ = run({ LINKS_SW_FILE: path.join(fx, 'missing.js') })
+  if (re_.status === 1 && /SW 本体が見つからない/.test(re_.stdout)) ok('配線: SW 本体の欠落を致命化する floor が効いている')
+  else bad(`SW 本体欠落の floor が効いていない: status=${re_.status}`)
+
+  // (f) 負のサニティ: 正本 public/sw.js は静的・実走の両ガードとも素通りすること。
+  //     ここを見ないと (a)〜(e) は「常に落ちる実装」でも全部通る。
+  const rf = spawnSync(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--list'], { encoding: 'utf8' })
+  if (rf.status === 0 && !/\[SW実走\]/.test(rf.stdout) && !/\[SW\//.test(rf.stdout)) {
+    ok('配線: 正本 public/sw.js は静的・実走の両 SW ガードとも素通りする')
+  } else bad(`正本で SW ガードが誤検知: status=${rf.status}`)
 
   fs.rmSync(fx, { recursive: true, force: true })
 }

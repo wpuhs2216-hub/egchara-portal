@@ -447,6 +447,12 @@ const SW_CACHE_KEYS_RE = /caches\s*\.\s*keys\s*\(\s*\)/
 const SW_UNFILTERED_UNREGISTER_RE = /getRegistrations\s*\(\s*\)[\s\S]{0,200}?\.then\s*\(\s*(?:\(\s*)?([A-Za-z_$][\w$]*)\s*\)?\s*=>[\s\S]{0,200}?\1\s*\.\s*map\s*\(/
 // キー列挙 ks を .filter を通さずそのまま .map(k => caches.delete(k)) へ渡している形。
 const SW_UNFILTERED_CACHE_DELETE_RE = /caches\s*\.\s*keys\s*\(\s*\)[\s\S]{0,200}?\.then\s*\(\s*(?:\(\s*)?([A-Za-z_$][\w$]*)\s*\)?\s*=>[\s\S]{0,200}?\1\s*\.\s*map\s*\(/
+// 反転形(Day110): filter はあるが条件が `k !== CACHE_NAME` だけ＝「自分の現行**以外は全部**消す」。
+// caches.keys() はオリジン全体を返すので、これは絞り込みではなく他アプリの全消しそのもの。
+// 上の2規則は「filter があれば白」と読むため、この形は素通りしていた。
+// 肯定形の所有判定(`k.startsWith(PREFIX) && k !== CACHE_NAME`)は `=>` の直後が識別子の
+// 比較で終わらないので一致しない＝修正形を誤検知しない。
+const SW_NAME_ONLY_FILTER_RE = /caches\s*\.\s*keys\s*\(\s*\)[\s\S]{0,200}?\.filter\s*\(\s*(?:function\s*)?\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*(?:=>|\{\s*return)\s*\1\s*!==?\s*[A-Za-z_$][\w$.]*\s*[)}]/
 
 /**
  * SW ブートストラップが「オリジン全体を無条件に巻き込む」形に退行していないか。
@@ -464,6 +470,8 @@ export function findOriginWideSwWipes(entries) {
     }
     if (SW_UNFILTERED_CACHE_DELETE_RE.test(src)) {
       offenders.push({ file, kind: 'キャッシュ', why: 'caches.keys() の結果を絞らず全件 delete している（子アプリのプリキャッシュまで毎回消える）' })
+    } else if (SW_NAME_ONLY_FILTER_RE.test(src)) {
+      offenders.push({ file, kind: 'キャッシュ', why: 'caches.keys() を「自分の現行キャッシュ以外」で絞って delete している（絞り込みに見えて、同居する子アプリのプリキャッシュを全部消す形）' })
     }
   }
   return { offenders, scanned }

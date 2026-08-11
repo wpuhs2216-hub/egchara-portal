@@ -15,6 +15,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fetchWithRetry } from './fetch-with-retry.mjs'
 import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, CROSS_REPO_PREFIXES, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes } from './lib/extract-targets.mjs'
+import { simulateSwActivate } from './lib/sw-activate-sim.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -314,23 +315,81 @@ if (a11yOffenders.length > 0) {
 // /word-wolf/・/kingscup/ も本番 200)の SW とプリキャッシュが、ポータルを開くたびに全部消えていた。
 // 相互リンクなので通常動線でそのまま踏む。HTTP 検査では全ルートが 200 なので永久に無検知。
 // LINKS_SW_DIR は selftest 用の非破壊 override(上と同じ理由で LINKS_APP_DIR とは別の口)。
+//
+// Day110 の拡張: 母集団に **SW 本体 `public/sw.js` を加える**。Day107 は「ブートストラップ」
+// (app/layout.tsx のインライン script)だけを走査対象にしていたが、オリジン全体を巻き込む
+// 後片付けは SW 本体の activate にも同じ形で居座っており、`app/**/*.tsx` を見るこのガードの
+// 母集団に**そもそも入っていなかった**。ブートストラップは端末の救済用の一時コードで、
+// 恒久的に毎デプロイ走るのは SW 本体のほう＝守る優先度はむしろ本体が上。
+// LINKS_SW_FILE は selftest 用の非破壊 override。
+//
+// **母集団 floor は2つに分けて数える**。両者を1つの合計にすると、SW 本体が居るせいで
+// 合計が0にならず「ブートストラップが消えた(＝/sw.js が二度と登録されない)」が隠れる。
+// 守っている対象が別なら floor も別に置く。
 {
   const SW_DIR = process.env.LINKS_SW_DIR ? path.resolve(process.env.LINKS_SW_DIR) : path.join(ROOT, 'app')
-  const swEntries = collectPageFiles(SW_DIR)
+  const SW_FILE = process.env.LINKS_SW_FILE ? path.resolve(process.env.LINKS_SW_FILE) : path.join(ROOT, 'public/sw.js')
+  const bootEntries = collectPageFiles(SW_DIR)
     .filter((f) => /\.tsx?$/.test(f))
-    .map((f) => ({ file: f, src: fs.readFileSync(path.join(SW_DIR, f), 'utf8') }))
-  const { offenders: swOffenders, scanned: swScanned } = findOriginWideSwWipes(swEntries)
-  // 母集団0件の floor(Day91 と同型)。SW を触るソースが1件も無い＝ブートストラップが消えた
-  // (＝/sw.js が二度と登録されない)か、記法が変わって走査が空振りしたかのどちらかで、
-  // どちらも「✓ 問題なし」と出続けてよい状態ではない。
-  if (swScanned === 0) {
+    .map((f) => ({ file: `${path.relative(ROOT, SW_DIR)}/${f}`, src: fs.readFileSync(path.join(SW_DIR, f), 'utf8') }))
+  const boot = findOriginWideSwWipes(bootEntries)
+  // ②SW 本体側(Day110)。存在そのものの floor は下の実走ガードが持つので、ここは走査のみ。
+  const body = fs.existsSync(SW_FILE)
+    ? findOriginWideSwWipes([{ file: path.relative(ROOT, SW_FILE), src: fs.readFileSync(SW_FILE, 'utf8') }])
+    : { offenders: [] }
+  const swOffenders = [...boot.offenders, ...body.offenders]
+  // ①ブートストラップ側の母集団0件の floor(Day91 と同型)。SW を触るソースが app/ に1件も
+  // 無い＝登録が消えた(＝/sw.js が二度と登録されない)か、記法が変わって走査が空振りしたか
+  // のどちらかで、どちらも「✓ 問題なし」と出続けてよい状態ではない。
+  if (boot.scanned === 0) {
     console.log('  ✗ 抽出失敗 [SW] app/ に SW 登録/キャッシュを触るソースが1件も無い')
     console.log('[check-links] ✗ 致命: SW ブートストラップの母集団が0件（記法変更でガードが無言化した、または登録自体が消えた可能性）。scripts/lib/extract-targets.mjs の findOriginWideSwWipes を確認すること。')
     process.exit(1)
   }
   if (swOffenders.length > 0) {
-    for (const o of swOffenders) console.log(`  ✗ 巻き添え  [SW/${o.kind}] app/${o.file}: ${o.why}`)
-    console.log(`[check-links] ✗ 致命: SW ブートストラップがオリジン全体を無条件に巻き込んでいる ${swOffenders.length}件（同居する子アプリのオフライン能力を毎回破壊する）。`)
+    for (const o of swOffenders) console.log(`  ✗ 巻き添え  [SW/${o.kind}] ${o.file}: ${o.why}`)
+    console.log(`[check-links] ✗ 致命: SW がオリジン全体を巻き込んでいる ${swOffenders.length}件（同居する子アプリのオフライン能力を毎回破壊する）。`)
+    process.exit(1)
+  }
+}
+
+// --- SW の activate を実走させて削除対象を実測する(Day110) ---
+// 上の静的検査は「書き方」を見る。だが Day110 に見つかった実害は
+// `keys.filter((key) => key !== CACHE_NAME)` ＝**filter はあるのに他人のものを全部消す**形で、
+// 「絞っているか」を見る規則の上では白だった。SW は素の JS なので実際に走らせられる。
+// 偽 caches / 偽 self の上で activate を1回走らせ、**結果として何が消えたか**を直接見る。
+// 判定に使う「自分のキャッシュ名」もソースを読まずに実測する(fetch を1本流して caches.open()
+// に渡される名前を拾う)ので、定数名や記法が変わっても追随する。
+{
+  const SW_FILE = process.env.LINKS_SW_FILE ? path.resolve(process.env.LINKS_SW_FILE) : path.join(ROOT, 'public/sw.js')
+  if (!fs.existsSync(SW_FILE)) {
+    console.log(`  ✗ 欠落  [SW実走] ${path.relative(ROOT, SW_FILE)} が無い`)
+    console.log('[check-links] ✗ 致命: SW 本体が見つからない（配信されている /sw.js の実体が消えた、または置き場が変わった）。')
+    process.exit(1)
+  }
+  // 同居する子アプリのキャッシュ名。版番号は判定に無関係(接頭辞が別であることだけが本質)
+  // なので固定値にして、子アプリ側の版上げでこの検査が腐らないようにする。
+  const FOREIGN_KEYS = ['egtype-', 'pekarin-chinchiro-', 'word-wolf-', 'kingscup-'].map((p) => `${p}vX`)
+  const sim = await simulateSwActivate(fs.readFileSync(SW_FILE, 'utf8'), { origin: selfOrigin, foreignKeys: FOREIGN_KEYS })
+  const swFatal = []
+  // 母集団/前提の floor。どれも「検査が空振りしているのに緑」を作る経路。
+  if (!sim.hasActivate) swFatal.push('activate ハンドラが無い（後片付けの検査が母集団ごと空振りする）')
+  if (!sim.hasFetch) swFatal.push('fetch ハンドラが無い（自分のキャッシュ名を実測できず所有判定が不能）')
+  if (!sim.cacheName) swFatal.push('自オリジンの GET で caches.open() が呼ばれない（保存先＝所有キャッシュを特定できない）')
+  else if (!sim.ownPrefix) swFatal.push(`キャッシュ名 "${sim.cacheName}" に接頭辞の区切りが無い（名前だけでは自分のものと他アプリのものを区別できない＝安全な後片付けが原理的に書けない）`)
+  else if (FOREIGN_KEYS.some((k) => k.startsWith(sim.ownPrefix))) swFatal.push(`接頭辞 "${sim.ownPrefix}" が子アプリのキャッシュ名にも一致する（所有判定が退化している）`)
+  // 本体: 他アプリのキャッシュを1件でも消したら致命。
+  if (sim.foreignDeleted.length > 0) {
+    swFatal.push(`activate が同居アプリのキャッシュを削除した: ${sim.foreignDeleted.join(', ')}（Cache Storage はオリジン共有。デプロイのたびに子アプリのオフライン能力を落とす）`)
+  }
+  // 下限: 自分の旧版は消せていること。何も消さない no-op へ退化しても「他人を消していない」
+  // だけは満たされてしまうため、これが無いとガードは空洞になる。
+  if (sim.ownPrefix && !sim.deleted.includes(sim.ownStaleKey)) {
+    swFatal.push(`activate が自分の旧版キャッシュ ${sim.ownStaleKey} を消さない（後片付けが no-op へ退化し、旧版が永久に残る）`)
+  }
+  if (swFatal.length > 0) {
+    for (const w of swFatal) console.log(`  ✗ 実走  [SW実走] ${path.relative(ROOT, SW_FILE)}: ${w}`)
+    console.log(`[check-links] ✗ 致命: SW の activate を実走させた結果が不正 ${swFatal.length}件（全ルートが 200 を返すため HTTP 検査では永久に検知できない）。`)
     process.exit(1)
   }
 }
