@@ -27,6 +27,10 @@ export async function fetchWithRetry(url, {
   timeoutMs = 15000,
   backoffMs = 400,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  // 本文まで読むか(Day110)。既定は false＝従来どおりヘッダだけで判定する(死活監視の
+  // 90件で本文を読むのは無駄なだけでなく、画像 32件を毎回メモリへ展開することになる)。
+  // robots.txt のように「200 のまま中身が別物へ差し替わる」ことが実害になる少数の対象だけ true。
+  wantBody = false,
 } = {}) {
   let attempt = 0
   // eslint-disable-next-line no-constant-condition
@@ -44,6 +48,9 @@ export async function fetchWithRetry(url, {
       // OG 画像の配信欠陥を、対象に載せても検知できなかった。headers を持たないモック
       // (selftest)でも落ちないよう任意連鎖で読む。
       result = { url, status: res.status, ok: res.ok, attempts: attempt, contentType: res.headers?.get?.('content-type') ?? null }
+      // 本文の取得失敗(接続断など)は「取得できなかった」として扱う。ここで throw させると
+      // 一時失敗のリトライ経路へ乗るので、下の catch に任せる。
+      if (wantBody) result.body = await res.text?.()
     } catch (e) {
       result = { url, status: 0, ok: false, err: e.name, attempts: attempt }
     }

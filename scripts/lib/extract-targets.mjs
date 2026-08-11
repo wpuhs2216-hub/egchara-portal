@@ -470,6 +470,87 @@ export function findRobotsSitemapIssues(robotsTxt, { origin, publicSitemapPaths,
   return { issues, declared }
 }
 
+// --- 本番で「実際に配信されている」robots.txt(Day110) ---
+// 上の findRobotsSitemapIssues はリポの public/robots.txt を見るが、実測でそれだけでは足りない
+// ことが分かった: 本番 `https://egshugy.com/robots.txt` は **1949 バイト**で、リポの 113 バイトとは
+// 別物だった。Cloudflare の Managed content(AI クローラ向けの Content-Signal と Disallow 群)が
+// **前置**され、リポ由来の行はその後ろに残る形になっている。つまり
+//   ・リポをどれだけ厳密に突合しても、本番の robots.txt の中身は保証できない
+//   ・前置される側は portal のリポの外(Cloudflare の設定)でいつでも変わる
+// robots.txt はサイト全体のクロール可否という**最も広い影響範囲**を持つ1ファイルなのに、
+// Day109 まで死活監視の対象にすら入っていなかった(実測: 監視90件に robots.txt も sitemap.xml も
+// 1件も無い)。しかも仮に対象へ入れても従来の検査は res.ok しか見ないので、
+// **200 のまま中身が別物へ差し替わる**という今回の実態は永久に映らない(Day104 の OG content-type
+// と同型)。よって「200 か」ではなく「**その robots.txt がクロールを許しているか / 申告が生きているか**」
+// を見る。
+//
+// 判定(重い順):
+//   blocks-all    … `User-agent: *` のグループに `Disallow: /` がある＝サイト全体が索引から消える
+//   no-sitemap    … リポは Sitemap を宣言しているのに配信物には1行も無い。デプロイ待ちでは
+//                   説明できない(デプロイすれば必ず出る)＝配信側が中身を落としている証拠
+//   pending-deploy… リポの宣言の一部だけが未反映。人間ゲートの npm run deploy 待ちで説明できる
+//   ok / unreachable
+const ROBOTS_GROUP_SPLIT_RE = /\r?\n/
+/**
+ * robots.txt を「User-agent 行の連なり + 続くルール行」のグループへ分解する。
+ * 連続する User-agent 行は同じグループを共有する(RFC 9309 §2.2.1)。
+ * @returns [{ agents: ['*'], rules: [{ field: 'disallow', value: '/' }] }]
+ */
+export function parseRobotsGroups(robotsTxt) {
+  const groups = []
+  let cur = null
+  for (const raw of robotsTxt.split(ROBOTS_GROUP_SPLIT_RE)) {
+    const line = raw.replace(/#.*$/, '').trim()
+    if (!line) continue
+    const m = /^([A-Za-z-]+)\s*:\s*(.*)$/.exec(line)
+    if (!m) continue
+    const field = m[1].toLowerCase()
+    const value = m[2].trim()
+    if (field === 'user-agent') {
+      // 直前もエージェント宣言だけなら同じグループへ足す(ルールが1行でも入ったら別グループ)。
+      if (cur && cur.rules.length === 0) cur.agents.push(value.toLowerCase())
+      else { cur = { agents: [value.toLowerCase()], rules: [] }; groups.push(cur) }
+      continue
+    }
+    // Sitemap はグループに属さない非グループディレクティブ(RFC 9309 §2.2.3)。直前の
+    // User-agent の規則として混ぜると、rules を「そのエージェントへの指示」として読む
+    // 側が実在しない指示を1件多く見ることになる(現状 disallow しか見ていないので実害は
+    // 無いが、規則の集合そのものが嘘になっていると後から足す判定が必ず間違う)。
+    if (field === 'sitemap') continue
+    if (!cur) continue  // グループ外のその他ディレクティブもここでは扱わない
+    cur.rules.push({ field, value })
+  }
+  return groups
+}
+
+/**
+ * @param served  { status, body } 本番から取得した robots.txt
+ * @param declaredSitemapUrls リポの public/robots.txt が宣言している Sitemap URL 全件
+ * @returns { verdict, servedSitemaps, missingOnProd, blockedBy }
+ */
+export function classifyServedRobots({ status, body }, declaredSitemapUrls = []) {
+  if (status !== 200 || typeof body !== 'string') {
+    return { verdict: 'unreachable', servedSitemaps: [], missingOnProd: [], blockedBy: null }
+  }
+  const servedSitemaps = [...body.matchAll(ROBOTS_SITEMAP_RE)].map((m) => m[1])
+  // `User-agent: *` を含むグループの Disallow: / を探す。値が厳密に '/' のときだけ全面禁止。
+  // (`/foo` は部分的な禁止、空値は「何も禁止しない」の意＝ Allow: / と同義)
+  const blocking = parseRobotsGroups(body).find(
+    (g) => g.agents.includes('*') && g.rules.some((r) => r.field === 'disallow' && r.value === '/'),
+  )
+  if (blocking) {
+    return { verdict: 'blocks-all', servedSitemaps, missingOnProd: [], blockedBy: blocking }
+  }
+  const missingOnProd = declaredSitemapUrls.filter((u) => !servedSitemaps.includes(u))
+  if (declaredSitemapUrls.length > 0 && servedSitemaps.length === 0) {
+    return { verdict: 'no-sitemap', servedSitemaps, missingOnProd, blockedBy: null }
+  }
+  if (missingOnProd.length > 0) {
+    return { verdict: 'pending-deploy', servedSitemaps, missingOnProd, blockedBy: null }
+  }
+  return { verdict: 'ok', servedSitemaps, missingOnProd, blockedBy: null }
+}
+
 // --- Service Worker ブートストラップの巻き添え(Day107) ---
 // 実測: `app/layout.tsx` の SW ブートストラップは
 //   getRegistrations().then(rs => Promise.all(rs.map(r => r.unregister())))

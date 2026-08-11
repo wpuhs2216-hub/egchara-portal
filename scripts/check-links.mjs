@@ -14,7 +14,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fetchWithRetry } from './fetch-with-retry.mjs'
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, CROSS_REPO_PREFIXES, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes } from './lib/extract-targets.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, CROSS_REPO_PREFIXES, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes, findRobotsSitemapIssues, classifyServedRobots } from './lib/extract-targets.mjs'
 import { simulateSwActivate } from './lib/sw-activate-sim.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -405,7 +405,40 @@ const crossPrefixes = process.env.LINKS_CROSS_REPO_PREFIXES
   ? process.env.LINKS_CROSS_REPO_PREFIXES.split(',').map((s) => s.trim()).filter(Boolean)
   : CROSS_REPO_PREFIXES
 const classify = (url) => classifyTargetUrl(url, BASE, crossPrefixes)
+
+// --- クロール入口(robots.txt と申告された sitemap)を監視対象へ(Day110) ---
+// 実測: Day109 時点の監視90件に **robots.txt も sitemap.xml も1件も入っていない**。Day107 で
+// sitemap.xml の中身(実ルートの網羅)は固定したのに、その sitemap を配信できているか・
+// クローラへ申告できているかは誰も見ていなかった＝**中身を守った入口が丸ごと無監視**。
+// 申告先は robots.txt に書いてある文字列がそのまま真実なので、ハードコードせず宣言から導く
+// (sitemap を増やしても申告さえすれば自動的に監視へ載る／申告だけ増やして実体が無ければ
+// 下の静的突合が落とす、の両側になる)。
+// LINKS_ROBOTS / LINKS_PUBLIC_DIR は selftest 用の非破壊 override(他ガードと別の口)。
+const ROBOTS_PATH = process.env.LINKS_ROBOTS ? path.resolve(process.env.LINKS_ROBOTS) : path.join(ROOT, 'public/robots.txt')
+const ROBOTS_PUBLIC_DIR = process.env.LINKS_PUBLIC_DIR ? path.resolve(process.env.LINKS_PUBLIC_DIR) : path.join(ROOT, 'public')
+const robotsTxt = fs.readFileSync(ROBOTS_PATH, 'utf8')
+// public/ 配下に実在する sitemap(再帰)。名前規約はファイル名に sitemap を含む .xml。
+const publicSitemapPaths = (function collectSitemaps(dir, prefix = '') {
+  const out = []
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (e.isDirectory()) out.push(...collectSitemaps(path.join(dir, e.name), `${prefix}/${e.name}`))
+    else if (/sitemap.*\.xml$/i.test(e.name)) out.push(`${prefix}/${e.name}`)
+  }
+  return out
+})(ROBOTS_PUBLIC_DIR)
+const { issues: robotsIssues, declared: declaredSitemaps } = findRobotsSitemapIssues(robotsTxt, {
+  origin: selfOrigin,
+  publicSitemapPaths,
+  crossRepoPrefixes: crossPrefixes,
+})
+// 自オリジンの宣言だけを監視へ載せる(別オリジンの宣言は下の静的突合が不整合として落とす)。
+const crawlEntryPaths = ['/robots.txt', ...declaredSitemaps
+  .map((u) => { try { return new URL(u) } catch { return null } })
+  .filter((p) => p && p.origin === selfOrigin)
+  .map((p) => p.pathname)]
+
 const rawTargets = [
+  ...crawlEntryPaths.map((p) => ({ url: BASE + p, cat: 'クロール入口' })),
   ...internal.map((p) => ({ url: BASE + p, cat: '内部' })),
   ...charImages.map((p) => ({ url: BASE + p, cat: 'キャラ画像' })),
   ...charPages.map((p) => ({ url: BASE + p, cat: 'キャラ型頁' })),
@@ -526,6 +559,33 @@ if (misclassified.length > 0) {
   }
 }
 
+// --- robots.txt の Sitemap 宣言 ⇔ 実体(Day110) ---
+// 配置: sitemap 段の直後。sitemap の**中身**を固定した後に、その sitemap への**入口**を固定する
+// (入口が死んでいれば中身の網羅性には意味が無く、逆に入口だけ増やしても実体が無ければ
+// 死んだ URL をクローラへ差し出し続ける)。突合は sitemap 段と同じく双方向。
+{
+  // floor その1: 宣言が1行も読めない。robots.txt から Sitemap を削った/書式を変えた場合、
+  // 突合は必ず「不整合0件」になり、このガードも上の監視対象化(crawlEntryPaths)も同時に
+  // 無言で消える(監視件数だけが静かに減る＝Day108 の「正常な空と壊れた空」)。
+  if (declaredSitemaps.length === 0) {
+    console.log(`  ✗ 抽出失敗 [robots] ${path.relative(ROOT, ROBOTS_PATH)} から Sitemap 宣言を1件も抽出できない`)
+    console.log('[check-links] ✗ 致命: robots.txt の Sitemap 宣言が0件（クローラへの申告が消えたか、書式変更でガードが無言化した可能性）。')
+    process.exit(1)
+  }
+  // floor その2: public/ から sitemap を1件も導けない。走査が壊れると「未宣言0件」＝
+  // 申告漏れが無い状態と区別がつかなくなり、逆方向の突合だけが空振りする。
+  if (publicSitemapPaths.length === 0) {
+    console.log(`  ✗ 抽出失敗 [robots] ${path.relative(ROOT, ROBOTS_PUBLIC_DIR)} に sitemap の実体が1件も無い`)
+    console.log('[check-links] ✗ 致命: public/ の sitemap 実体が0件（配信物が消えたか、走査の失敗が「申告漏れ無し」と同じ結末へ潰れている）。')
+    process.exit(1)
+  }
+  if (robotsIssues.length > 0) {
+    for (const i of robotsIssues) console.log(`  ✗ ${i.kind}  [robots] ${i.url}: ${i.why}`)
+    console.log(`[check-links] ✗ 致命: robots.txt の Sitemap 宣言と実体の不整合 ${robotsIssues.length}件（宣言も実体も 200 を返しうるため HTTP 検査では検知できない）。`)
+    process.exit(1)
+  }
+}
+
 console.log(`[check-links] base=${BASE} 内部${internal.length}(featured-apps=${featuredLive ? 'live' : 'dead:除外'} / 実ルート${appRoutes.length}・うち無リンク${unlinkedRoutes.length}) + キャラ画像${charImages.length} + キャラ型頁${charPages.length} + 外部${externals.length} = ${targets.length}件（hard: portal自前${portalTargets.length} + 外部${externalTargets.length} / soft: egtype配信${softTargets.length}）${dupCount ? `(重複${dupCount}件を排除)` : ''}${STRICT ? ' [strict]' : ''}`)
 
 // --list: 実リクエストを出さずに監視対象だけを吐いて終わる(Day97)。
@@ -571,6 +631,28 @@ if (ogPending.length > 0) {
   console.log(`[check-links] ⓘ OG配信 ${ogPending.length}/${ogRoutes.length} 件が本番未反映(404) — 拡張子つき OG はビルド物には含まれる(postbuild-og-ext)。本番反映は人間ゲートの npm run deploy 待ち＝想定内。`)
 }
 
+// --- 本番で配信されている robots.txt の中身(Day110) ---
+// 上の静的突合はリポの public/robots.txt を見るが、実測で**本番はリポと別物**だった:
+// `https://egshugy.com/robots.txt` は 1949 バイト（リポは 113 バイト）で、Cloudflare の
+// Managed content（Content-Signal と AI クローラ向け Disallow 群）が前置され、リポ由来の行は
+// その後ろに残っている。前置される側は portal のリポの外で変わるので、リポをどれだけ厳密に
+// 突合しても本番の中身は保証できない。そして 200 は返るので、res.ok しか見ない従来の検査では
+// 中身が別物へ差し替わっても永久に映らない（Day104 の OG content-type と同型）。
+// ここだけは**取得した本文**を見る。robots.txt はサイト全体のクロール可否を1ファイルで決めるので、
+// 全面 Disallow と申告の消失は他のどのリンク切れよりも影響が広い。
+const robotsRes = await fetchWithRetry(`${BASE}/robots.txt`, { wantBody: true })
+const servedRobots = classifyServedRobots(robotsRes, declaredSitemaps)
+if (servedRobots.verdict === 'blocks-all') {
+  console.log(`  ✗ 全面拒否  [robots] ${BASE}/robots.txt が User-agent: * に Disallow: / を含む（サイト全体が検索結果から消える）`)
+} else if (servedRobots.verdict === 'no-sitemap') {
+  console.log(`  ✗ 申告消失  [robots] リポは Sitemap を ${declaredSitemaps.length}件宣言しているのに配信物には1行も無い（デプロイ待ちでは説明できない＝配信側が中身を落としている）`)
+} else if (servedRobots.verdict === 'unreachable') {
+  console.log(`  ⚠ ${robotsRes.status || robotsRes.err}  [robots] ${BASE}/robots.txt を取得できない`)
+} else if (servedRobots.verdict === 'pending-deploy') {
+  console.log(`[check-links] ⓘ robots 申告 ${servedRobots.missingOnProd.length}/${declaredSitemaps.length}件が本番未反映 — 人間ゲートの npm run deploy 待ちなら想定内: ${servedRobots.missingOnProd.join(' ')}`)
+}
+const robotsFatal = servedRobots.verdict === 'blocks-all' || servedRobots.verdict === 'no-sitemap'
+
 const hardBad = results.filter((r) => !r.ok && !r.soft)
 const softBad = results.filter((r) => !r.ok && r.soft)
 
@@ -581,19 +663,20 @@ if (softBad.length > 0) {
   console.log(`[check-links] ⚠ egtype依存(soft) ${softBad.length}/${softTargets.length} 件が未到達 — egtype 本番デプロイ待ちなら想定内(portal と egtype はセットでデプロイ)。デプロイ後は --strict で厳格確認。`)
 }
 
-const fatal = hardBad.length > 0 || localMissing.length > 0 || ogBadType.length > 0 || (STRICT && softBad.length > 0)
+const fatal = hardBad.length > 0 || localMissing.length > 0 || ogBadType.length > 0 || robotsFatal || (STRICT && softBad.length > 0)
+const robotsLabel = `robots ${servedRobots.verdict === 'ok' ? `申告${servedRobots.servedSitemaps.length}件が本番にも実在` : servedRobots.verdict}`
 const ogOkLabel = `OG配信 ${ogResults.filter((r) => r.verdict === 'ok').length}/${ogRoutes.length}件が image/*`
 if (!fatal && hardBad.length === 0 && softBad.length === 0) {
-  console.log(`[check-links] ✓ 全${results.length}件 OK / ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合 / ${ogOkLabel}`)
+  console.log(`[check-links] ✓ 全${results.length}件 OK / ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合 / ${ogOkLabel} / ${robotsLabel}`)
   process.exit(0)
 } else if (!fatal) {
   // 「portal自前 N/N」の N は **portal 自身がデプロイする分だけ** を数える(Day101)。
   // 従来は分母に egtype 配信の33件(キャラ画像32 + /egtype/)が混ざっており、hard で通った
   // 件数をそのまま「自前」と称していた＝集計の嘘だった。PM で外部リンクも分けた(hard では
   // あるが portal 自前ではない。混ぜると同じ嘘の作り直しになる)。
-  console.log(`[check-links] ✓ portal自前 ${portalTargets.length}/${portalTargets.length} 件 + 外部 ${externalTargets.length}件 OK（egtype配信 soft ${softTargets.length}件中 ${softBad.length}件未到達＝警告のみ）/ ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合 / ${ogOkLabel}`)
+  console.log(`[check-links] ✓ portal自前 ${portalTargets.length}/${portalTargets.length} 件 + 外部 ${externalTargets.length}件 OK（egtype配信 soft ${softTargets.length}件中 ${softBad.length}件未到達＝警告のみ）/ ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合 / ${ogOkLabel} / ${robotsLabel}`)
   process.exit(0)
 } else {
-  console.log(`[check-links] ✗ 致命 ${hardBad.length}件${localMissing.length ? ` + ローカル静的欠落 ${localMissing.length}件` : ''}${ogBadType.length ? ` + OG配信の型なし ${ogBadType.length}件` : ''}${STRICT ? ` + soft ${softBad.length}件` : ''} / 全${results.length}件`)
+  console.log(`[check-links] ✗ 致命 ${hardBad.length}件${localMissing.length ? ` + ローカル静的欠落 ${localMissing.length}件` : ''}${ogBadType.length ? ` + OG配信の型なし ${ogBadType.length}件` : ''}${robotsFatal ? ` + robots(${servedRobots.verdict})` : ''}${STRICT ? ` + soft ${softBad.length}件` : ''} / 全${results.length}件`)
   process.exit(1)
 }
