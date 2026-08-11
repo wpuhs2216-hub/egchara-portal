@@ -1,12 +1,30 @@
 // サービスワーカー - ネットワークファースト + オフラインフォールバック
-const CACHE_NAME = 'portal-v1'
+// キャッシュ名は必ず CACHE_PREFIX で始める。egshugy.com には子アプリ(egtype /
+// pekarin-chinchiro / word-wolf / kingscup)が同居していて Cache Storage は
+// **オリジン単位で共有**されるため、「どれが自分のものか」を名前だけで判定できないと
+// 後片付けが他所のアプリの破壊になる(下記 activate 参照)。
+const CACHE_PREFIX = 'portal-'
+const CACHE_NAME = `${CACHE_PREFIX}v1`
 
 self.addEventListener('install', () => self.skipWaiting())
 
+// 旧版の後片付け。従来は `keys.filter((key) => key !== CACHE_NAME)` ＝**自分の現行キャッシュ
+// 以外を全部消す**形だった。caches.keys() はスコープではなく**オリジン全体**を返すので、
+// これは「同居する子アプリのプリキャッシュを全部消す」と同義。偽 caches 上で実走させて
+// 実測したところ、activate 1回で egtype-v136 / pekarin-chinchiro-v3 / word-wolf-v2 /
+// kingscup-v1 の4件が消えた(Day110)。activate は初回インストール時と sw.js の内容が
+// 変わるたび(install が skipWaiting するので即時)に走る＝デプロイのたびに全員のオフライン
+// 能力を巻き添えで落とす。Day107 は app/layout.tsx のブートストラップ側だけを直しており、
+// **恒久的に居座る SW 本体のこの行が残っていた**。
+// 消してよいのは「自分の接頭辞を持つ かつ 現行ではない」キャッシュだけ。
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
-      Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)))
+      Promise.all(
+        keys
+          .filter((key) => key.startsWith(CACHE_PREFIX) && key !== CACHE_NAME)
+          .map((key) => caches.delete(key))
+      )
     ).then(() => self.clients.claim())
   )
 })
