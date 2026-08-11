@@ -424,6 +424,52 @@ export function findSitemapCoverageGaps(routeEntries, sitemapXml, origin, crossR
   return { missing, stale, contradictory, locCount: locs.length }
 }
 
+// --- robots.txt の Sitemap 宣言(Day110) ---
+// Day107 は sitemap.xml の**中身**(実ルートを網羅しているか)を固定したが、その sitemap を
+// クローラへ知らせる唯一の宣言である robots.txt の `Sitemap:` 行は誰も検査していなかった。
+// 実測では2行(自前 / egtype 配信)とも 200 だが、無検査ということは
+//   ・申告した sitemap を誰も出力しなくなっても気づかない(死んだ入口を出し続ける)
+//   ・sitemap を増やしても申告し忘れたまま気づかない(発見経路が1本減る)
+//   ・オリジンを書き間違えても気づかない(別サイトの sitemap 宣言はクロールに使われない)
+// のどれもが起きたまま「✓ 全件OK」と出る。sitemap 側と同じく**双方向**で突合する。
+const ROBOTS_SITEMAP_RE = /^[^\S\r\n]*Sitemap[^\S\r\n]*:[^\S\r\n]*(\S+)[^\S\r\n]*$/gim
+
+/**
+ * @param robotsTxt          public/robots.txt の中身
+ * @param origin             自サイトの origin(末尾スラッシュ無し)
+ * @param publicSitemapPaths public/ に実在する sitemap のパス(['/sitemap.xml'] 形式)
+ * @param crossRepoPrefixes  別リポ配信の接頭辞(実体を portal 側に持たないので実在検査から除く)
+ * @returns { issues, declared } declared は宣言された URL 全件(0件を致命化する floor の根拠)
+ */
+export function findRobotsSitemapIssues(robotsTxt, { origin, publicSitemapPaths, crossRepoPrefixes = CROSS_REPO_PREFIXES }) {
+  const declared = [...robotsTxt.matchAll(ROBOTS_SITEMAP_RE)].map((m) => m[1])
+  const issues = []
+  const declaredOwnPaths = []
+  for (const u of declared) {
+    let parsed
+    try { parsed = new URL(u) } catch {
+      issues.push({ url: u, kind: '不正', why: '絶対URLとして解釈できない(robots.txt の Sitemap は絶対URL必須＝この行は無視される)' })
+      continue
+    }
+    if (parsed.origin !== origin) {
+      issues.push({ url: u, kind: '別オリジン', why: `自サイト(${origin})の外を指している。robots.txt の Sitemap 宣言は同一サイトのものしかクロールに使われない` })
+      continue
+    }
+    declaredOwnPaths.push(parsed.pathname)
+    // 別リポ配信(/egtype/)の実体は portal のリポに無いので、実在検査ではなく HTTP 側(soft)で見る。
+    if (crossRepoPrefixes.some((pre) => parsed.pathname.startsWith(pre))) continue
+    if (!publicSitemapPaths.includes(parsed.pathname)) {
+      issues.push({ url: u, kind: '実体なし', why: `portal 自前の配信物として申告しているのに public${parsed.pathname} が存在しない(誰も出力しない sitemap を入口として出し続ける)` })
+    }
+  }
+  for (const p of publicSitemapPaths) {
+    if (!declaredOwnPaths.includes(p)) {
+      issues.push({ url: `${origin}${p}`, kind: '未宣言', why: `public${p} を配信しているのに robots.txt が申告していない(クローラへの発見経路が1本減る)` })
+    }
+  }
+  return { issues, declared }
+}
+
 // --- Service Worker ブートストラップの巻き添え(Day107) ---
 // 実測: `app/layout.tsx` の SW ブートストラップは
 //   getRegistrations().then(rs => Promise.all(rs.map(r => r.unregister())))
