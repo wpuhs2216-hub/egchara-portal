@@ -25,7 +25,7 @@ import { fetchWithRetry, isTransientStatus } from './fetch-with-retry.mjs'
 // ための逃がし弁で、従来はカテゴリごとの手書きリテラルだったため実際の配信主体とずれていた
 // (同じ /egtype/ 依存で画像は hard・型ページは soft)。URL 由来の述語に変えた分、今度は
 // 「接頭辞を広げれば自前のリンク切れまで警告のみにできる」経路が生まれるので、そこも押さえる。
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes } from './lib/extract-targets.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes, findRobotsSitemapIssues, classifyServedRobots, parseRobotsGroups } from './lib/extract-targets.mjs'
 //
 // 追加(Day110): SW の後片付けを「書き方」ではなく「**実際に何を消したか**」で固定する。
 // Day107 の静的規則は `caches.keys()` の結果を絞らず delete する形を黒としたが、実害として
@@ -916,6 +916,175 @@ self.addEventListener('fetch', (event) => {
   fs.rmSync(fx, { recursive: true, force: true })
 }
 
+
+
+// ㊾ robots.txt の Sitemap 宣言 ⇔ 実体(Day110)。
+//   Day107 は sitemap.xml の中身を固定したが、その sitemap への**入口**である robots.txt の
+//   Sitemap 行は誰も検査していなかった。宣言も実体も 200 を返しうるので HTTP 検査では映らない。
+{
+  const O = 'https://egshugy.com'
+  const opts = (paths) => ({ origin: O, publicSitemapPaths: paths, crossRepoPrefixes: ['/egtype/'] })
+  const good = `User-agent: *\nAllow: /\n\nSitemap: ${O}/sitemap.xml\nSitemap: ${O}/egtype/sitemap.xml\n`
+
+  const r1 = findRobotsSitemapIssues(good, opts(['/sitemap.xml']))
+  if (r1.issues.length === 0 && r1.declared.length === 2) {
+    ok('robots: 正本の形(自前1件 + 別リポ配信1件)は不整合0件・宣言2件を抽出')
+  } else bad(`正本形で誤検知: ${JSON.stringify(r1)}`)
+
+  // 宣言だけあって実体が無い＝誰も出力しない sitemap を入口として出し続ける。
+  const r2 = findRobotsSitemapIssues(`Sitemap: ${O}/sitemap.xml\nSitemap: ${O}/nope.xml\n`, opts(['/sitemap.xml']))
+  if (r2.issues.length === 1 && r2.issues[0].kind === '実体なし' && r2.issues[0].url.endsWith('/nope.xml')) {
+    ok('robots: 実体の無い Sitemap 宣言を検出')
+  } else bad(`実体なしを検出できない: ${JSON.stringify(r2.issues)}`)
+
+  // 逆方向: 実体はあるのに申告していない＝クローラへの発見経路が1本減る。
+  const r3 = findRobotsSitemapIssues(`Sitemap: ${O}/sitemap.xml\n`, opts(['/sitemap.xml', '/sitemap-news.xml']))
+  if (r3.issues.length === 1 && r3.issues[0].kind === '未宣言' && r3.issues[0].url.endsWith('/sitemap-news.xml')) {
+    ok('robots: 実在するのに未申告の sitemap を検出(双方向)')
+  } else bad(`未宣言を検出できない: ${JSON.stringify(r3.issues)}`)
+
+  // 別オリジン/相対URL は robots.txt の仕様上クロールに使われない＝申告した気になるだけ。
+  const r4 = findRobotsSitemapIssues(`Sitemap: https://example.com/sitemap.xml\nSitemap: /sitemap.xml\n`, opts(['/sitemap.xml']))
+  const kinds = r4.issues.map((i) => i.kind).sort()
+  if (kinds.join(',') === '不正,別オリジン,未宣言') {
+    ok('robots: 別オリジン宣言と相対URL宣言を無効として指摘し、自前の未申告も同時に出す')
+  } else bad(`別オリジン/不正の扱いが想定外: ${JSON.stringify(kinds)}`)
+
+  // 別リポ配信(/egtype/)は portal のリポに実体を持たないので実在検査から外す(soft の HTTP 側で見る)。
+  const r5 = findRobotsSitemapIssues(`Sitemap: ${O}/sitemap.xml\nSitemap: ${O}/egtype/sitemap.xml\n`, opts(['/sitemap.xml']))
+  if (r5.issues.length === 0) ok('robots: 別リポ配信の宣言をリポ内実在検査の対象にしない(false-red を出さない)')
+  else bad(`cross-repo を誤検知: ${JSON.stringify(r5.issues)}`)
+
+  // 書式の揺れ(小文字・前後の空白)でも拾えること。拾えないと floor が「宣言0件」で
+  // 落ちるだけになり、実際の不整合は永久に見えない。
+  const r6 = findRobotsSitemapIssues(`  sitemap :  ${O}/sitemap.xml  \n`, opts(['/sitemap.xml']))
+  if (r6.declared.length === 1) ok('robots: 大文字小文字と前後空白の揺れを許容して宣言を抽出')
+  else bad(`書式の揺れを取りこぼす: ${JSON.stringify(r6.declared)}`)
+}
+
+// ㊿ 本番で「実際に配信されている」robots.txt(Day110)。
+//   実測: 本番 robots.txt は 1949B でリポ(113B)と別物。Cloudflare の Managed content が前置され、
+//   リポ由来の行は後ろに残る。前置側は portal のリポの外で変わるので、リポの突合だけでは
+//   本番の中身を保証できない。200 は返るため res.ok しか見ない検査には一生映らない。
+{
+  const O = 'https://egshugy.com'
+  const declared = [`${O}/sitemap.xml`, `${O}/egtype/sitemap.xml`]
+  const served = (body, status = 200) => classifyServedRobots({ status, body }, declared)
+
+  const okBody = `User-agent: *\nAllow: /\n\nSitemap: ${O}/sitemap.xml\nSitemap: ${O}/egtype/sitemap.xml\n`
+  if (served(okBody).verdict === 'ok') ok('robots実配信: 宣言が全て本番にも実在すれば ok')
+  else bad(`正常形の判定が想定外: ${JSON.stringify(served(okBody))}`)
+
+  // 最大の実害: サイト全体が検索結果から消える。
+  const v1 = served(`User-agent: *\nDisallow: /\n\nSitemap: ${O}/sitemap.xml\nSitemap: ${O}/egtype/sitemap.xml\n`)
+  if (v1.verdict === 'blocks-all') ok('robots実配信: User-agent: * の Disallow: / を全面拒否として検出')
+  else bad(`全面拒否を検出できない: ${JSON.stringify(v1)}`)
+
+  // 部分的な禁止(/admin 等)は正常運用。ここを落とすと false-red で監視が信用されなくなる。
+  const v2 = served(`User-agent: *\nDisallow: /admin\nAllow: /\n\nSitemap: ${O}/sitemap.xml\nSitemap: ${O}/egtype/sitemap.xml\n`)
+  if (v2.verdict === 'ok') ok('robots実配信: 部分的な Disallow(/admin) は全面拒否と混同しない')
+  else bad(`部分 Disallow を誤検知: ${JSON.stringify(v2)}`)
+
+  // 実測の本番形(Cloudflare Managed content が前置され、他 UA だけが Disallow: /)。
+  // ここを blocks-all と読むと本番が毎日 red になる＝この検査自体が捨てられる。
+  const cf = `# BEGIN Cloudflare Managed content\nUser-agent: *\nContent-Signal: search=yes,ai-train=no\nAllow: /\n\nUser-agent: GPTBot\nDisallow: /\n\nUser-agent: CCBot\nDisallow: /\n# END Cloudflare Managed Content\n\nUser-agent: *\nAllow: /\n\nSitemap: ${O}/sitemap.xml\nSitemap: ${O}/egtype/sitemap.xml\n`
+  if (served(cf).verdict === 'ok') ok('robots実配信: 実測の本番形(CF前置・AI クローラのみ Disallow)を ok と読む')
+  else bad(`実測の本番形を誤検知: ${JSON.stringify(served(cf))}`)
+
+  // 宣言はあるのに配信物には1行も無い＝デプロイでは説明できない(デプロイすれば必ず出る)。
+  const v3 = served('User-agent: *\nAllow: /\n')
+  if (v3.verdict === 'no-sitemap') ok('robots実配信: 申告が配信物から丸ごと消えている状態を致命として区別')
+  else bad(`申告消失を検出できない: ${JSON.stringify(v3)}`)
+
+  // 一部だけ未反映は人間ゲートのデプロイ待ちで説明できる＝警告に留める。
+  const v4 = served(`User-agent: *\nAllow: /\nSitemap: ${O}/sitemap.xml\n`)
+  if (v4.verdict === 'pending-deploy' && v4.missingOnProd.length === 1) {
+    ok('robots実配信: 一部だけ未反映はデプロイ待ちとして致命にしない')
+  } else bad(`未反映の扱いが想定外: ${JSON.stringify(v4)}`)
+
+  if (served('', 404).verdict === 'unreachable') ok('robots実配信: 非200 は unreachable')
+  else bad('非200 の扱いが想定外')
+
+  // グループ解析の下限: 連続する User-agent 行は同一グループを共有する(RFC 9309)。
+  // ここが崩れると「*, GPTBot に続く Disallow: /」を * の全面拒否と読み違える/読み落とす。
+  const g = parseRobotsGroups('User-agent: *\nUser-agent: GPTBot\nDisallow: /\n')
+  if (g.length === 1 && g[0].agents.length === 2 && g[0].rules.length === 1) {
+    ok('robots解析: 連続する User-agent 行を同一グループとして扱う')
+  } else bad(`グループ解析が想定外: ${JSON.stringify(g)}`)
+  const g2 = parseRobotsGroups('# Disallow: /\nUser-agent: *\nAllow: / # 末尾コメント\n')
+  if (g2.length === 1 && g2[0].rules.length === 1 && g2[0].rules[0].field === 'allow') {
+    ok('robots解析: コメントを除去してから解釈する(コメント内の Disallow を規則と誤読しない)')
+  } else bad(`コメント処理が想定外: ${JSON.stringify(g2)}`)
+  // Sitemap はグループ非依存(RFC 9309 §2.2.3)。直前の User-agent の規則へ混ぜると
+  // 「そのエージェントへの指示」の集合が実態より多くなる。
+  const g3 = parseRobotsGroups(`User-agent: *\nAllow: /\nSitemap: ${O}/sitemap.xml\n`)
+  if (g3.length === 1 && g3[0].rules.length === 1 && g3[0].rules[0].field === 'allow') {
+    ok('robots解析: Sitemap をグループ規則へ混ぜない(非グループディレクティブ)')
+  } else bad(`Sitemap がグループ規則に混入: ${JSON.stringify(g3)}`)
+}
+
+// 51 fetchWithRetry の本文取得(Day110)。robots の中身検査はここに依存する。
+{
+  const res200 = { status: 200, ok: true, headers: { get: () => 'text/plain' }, text: async () => 'BODY' }
+  const withBody = await fetchWithRetry('u', { fetchImpl: async () => res200, sleep: noSleep, wantBody: true })
+  const noBody = await fetchWithRetry('u', { fetchImpl: async () => res200, sleep: noSleep })
+  if (withBody.body === 'BODY' && noBody.body === undefined) {
+    ok('fetch: wantBody 指定時だけ本文を返す(90件の死活監視は従来どおりヘッダのみ)')
+  } else bad(`wantBody の挙動が想定外: ${JSON.stringify([withBody.body, noBody.body])}`)
+}
+
+// 52 配線(Day110): 純関数が正しくても本体が致命化していなければ何も守れない。
+//   LINKS_ROBOTS / LINKS_PUBLIC_DIR の非破壊 override でフィクスチャを見せる。
+//   --list なので実ネットワークは発生しない(robots の実配信検査は fetch 段＝--list より後)。
+{
+  const fx = fs.mkdtempSync(path.join(os.tmpdir(), 'links-d110-'))
+  const write = (rel, src) => {
+    const full = path.join(fx, rel)
+    fs.mkdirSync(path.dirname(full), { recursive: true })
+    fs.writeFileSync(full, src)
+    return full
+  }
+  const run = (env) => spawnSync(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--list'],
+    { encoding: 'utf8', env: { ...process.env, ...env } })
+  const O = 'https://egshugy.com'  // 正本 app/layout.tsx の metadataBase
+
+  // (a) 実体の無い sitemap を申告していれば致命。
+  const rA = run({ LINKS_ROBOTS: write('robots-a.txt', `User-agent: *\nAllow: /\nSitemap: ${O}/sitemap.xml\nSitemap: ${O}/nope.xml\n`) })
+  if (rA.status === 1 && /実体なし\s+\[robots\].*nope\.xml/.test(rA.stdout)) {
+    ok('配線: 実体の無い Sitemap 宣言で exit 1(robots ガードが本体に届いている)')
+  } else bad(`robots ガードが本体で効いていない: status=${rA.status}`)
+
+  // (b) 宣言が1行も読めなければ致命(floor)。0件は必ず「不整合なし」に見え、
+  //     同時に監視対象化(クロール入口)も無言で消える。
+  const rB = run({ LINKS_ROBOTS: write('robots-b.txt', 'User-agent: *\nAllow: /\n') })
+  if (rB.status === 1 && /Sitemap 宣言を1件も抽出できない/.test(rB.stdout)) ok('配線: robots の Sitemap 宣言0件を致命化する floor が効いている')
+  else bad(`宣言0件 floor が効いていない: status=${rB.status}`)
+
+  // (c) public/ から sitemap の実体を1件も導けなければ致命(floor)。走査の失敗が
+  //     「申告漏れ無し」と同じ結末へ潰れる形(Day108 の「正常な空と壊れた空」)。
+  fs.mkdirSync(path.join(fx, 'emptypub'), { recursive: true })
+  const rC = run({ LINKS_PUBLIC_DIR: path.join(fx, 'emptypub') })
+  if (rC.status === 1 && /sitemap の実体が1件も無い/.test(rC.stdout)) ok('配線: public/ の sitemap 実体0件を致命化する floor が効いている')
+  else bad(`実体0件 floor が効いていない: status=${rC.status}`)
+
+  // (d) 監視対象化の配線: 申告した入口が実際に死活監視へ載り、owner 由来で致命度が割れること。
+  //     Day109 までは robots.txt も sitemap.xml も監視90件に1件も入っていなかった(実測)。
+  const rD = run({})
+  const entries = rD.stdout.split('\n').filter((l) => l.includes('\tクロール入口\t'))
+  const hardOwn = entries.filter((l) => l.startsWith('hard\t') && l.includes('\tportal'))
+  const softCross = entries.filter((l) => l.startsWith('soft\t') && l.includes('\tegtype'))
+  if (entries.length >= 3 && hardOwn.length === 2 && softCross.length === 1
+      && entries.some((l) => l.includes(`${O}/robots.txt`))) {
+    ok('配線: robots.txt と申告された sitemap が監視対象に載り、portal自前=hard / egtype配信=soft に割れる')
+  } else bad(`クロール入口の監視対象化が想定外: ${JSON.stringify(entries)}`)
+
+  // (e) 負のサニティ: 正本(public/robots.txt + public/)は素通りすること。
+  //     ここを見ないと (a)〜(c) は「常に落ちる実装」でも全部通る。
+  if (rD.status === 0 && !/\[robots\]/.test(rD.stdout)) ok('配線: 正本 public/robots.txt は robots ガードを素通りする')
+  else bad(`正本で robots ガードが誤検知: status=${rD.status}`)
+
+  fs.rmSync(fx, { recursive: true, force: true })
+}
 
 console.log(`\n[selftest-check-links] 結果: pass=${pass} fail=${fail}`)
 process.exit(fail === 0 ? 0 : 1)
