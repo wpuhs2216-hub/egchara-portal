@@ -16,7 +16,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { spawnSync } from 'node:child_process'
+import { spawnSync, spawn } from 'node:child_process'
+import http from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { fetchWithRetry, isTransientStatus } from './fetch-with-retry.mjs'
 //
@@ -25,7 +26,7 @@ import { fetchWithRetry, isTransientStatus } from './fetch-with-retry.mjs'
 // ための逃がし弁で、従来はカテゴリごとの手書きリテラルだったため実際の配信主体とずれていた
 // (同じ /egtype/ 依存で画像は hard・型ページは soft)。URL 由来の述語に変えた分、今度は
 // 「接頭辞を広げれば自前のリンク切れまで警告のみにできる」経路が生まれるので、そこも押さえる。
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes, findRobotsSitemapIssues, classifyServedRobots, parseRobotsGroups } from './lib/extract-targets.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes, findRobotsSitemapIssues, classifyServedRobots, parseRobotsGroups, classifyServedSitemap, isServedSitemapFatal } from './lib/extract-targets.mjs'
 //
 // 追加(Day110): SW の後片付けを「書き方」ではなく「**実際に何を消したか**」で固定する。
 // Day107 の静的規則は `caches.keys()` の結果を絞らず delete する形を黒としたが、実害として
@@ -1083,6 +1084,225 @@ self.addEventListener('fetch', (event) => {
   if (rD.status === 0 && !/\[robots\]/.test(rD.stdout)) ok('配線: 正本 public/robots.txt は robots ガードを素通りする')
   else bad(`正本で robots ガードが誤検知: status=${rD.status}`)
 
+  fs.rmSync(fx, { recursive: true, force: true })
+}
+
+// 53 本番で「実際に配信されている」sitemap.xml(Day113)。
+//   Day107 は sitemap の中身を、Day110 はその入口(robots.txt)を固定したが、どちらも**リポの中身**。
+//   実測(Day113): 本番 /sitemap.xml の <loc> は3件で、リポにある /noxa/ が無い(Day107 の修正が未反映)。
+//   これは「壊れている」ではなく「まだ届いていない」なので警告に留め、デプロイ遅れでは説明できない
+//   状態(取得不能/HTML/空/別オリジン)だけを致命にする——ここを混ぜると毎日 red になり検査ごと捨てられる。
+{
+  const O = 'https://egshugy.com'
+  const repoLocs = [`${O}/`, `${O}/noxa/`, `${O}/stamps/`, `${O}/egtype/`]
+  const xml = (locs) => `<?xml version="1.0" encoding="UTF-8"?>\n<urlset>${locs.map((u) => `<url><loc>${u}</loc></url>`).join('')}</urlset>`
+  const served = (body, status = 200) => classifyServedSitemap({ status, body }, { repoLocs, origin: O })
+
+  if (served(xml(repoLocs)).verdict === 'ok') ok('配信sitemap: リポと本番が一致すれば ok')
+  else bad(`正常形の判定が想定外: ${JSON.stringify(served(xml(repoLocs)))}`)
+
+  // 実測されている状態。デプロイ待ちで説明がつくので致命にしない。
+  const v1 = served(xml([`${O}/`, `${O}/stamps/`, `${O}/egtype/`]))
+  if (v1.verdict === 'pending-deploy' && v1.missingOnProd.length === 1 && v1.missingOnProd[0] === `${O}/noxa/`
+      && !isServedSitemapFatal(v1.verdict)) {
+    ok('配信sitemap: リポにあって本番に無い loc はデプロイ待ち(警告)として名指しする')
+  } else bad(`デプロイ遅れの判定が想定外: ${JSON.stringify(v1)}`)
+
+  // 逆向き(本番にあってリポに無い)も配信が古いだけなので致命にしない。
+  const v2 = served(xml([...repoLocs, `${O}/old/`]))
+  if (v2.verdict === 'ok' && !isServedSitemapFatal(v2.verdict)) {
+    ok('配信sitemap: 本番にだけ残る loc は致命にしない(古い配信で説明がつく)')
+  } else bad(`本番にだけある loc の判定が想定外: ${JSON.stringify(v2)}`)
+
+  // ここから下は「配信側が壊している」＝デプロイ遅れでは説明できない形。
+  const v3 = served('', 404)
+  if (v3.verdict === 'unreachable' && isServedSitemapFatal(v3.verdict)) {
+    ok('配信sitemap: 申告した入口が本番で取得できない(404)を致命として検出')
+  } else bad(`取得不能の判定が想定外: ${JSON.stringify(v3)}`)
+
+  // SPA フォールバックが拡張子付き URL まで飲み込むと 200 で HTML が返る(クローラは読めない)。
+  const v4 = served('<!doctype html>\n<html lang="ja"><body>portal</body></html>')
+  if (v4.verdict === 'not-xml' && isServedSitemapFatal(v4.verdict)) {
+    ok('配信sitemap: 200 だが HTML が返る形(SPAフォールバック)を致命として検出')
+  } else bad(`HTML フォールバックの判定が想定外: ${JSON.stringify(v4)}`)
+
+  const v5 = served('<?xml version="1.0"?>\n<urlset></urlset>')
+  if (v5.verdict === 'empty' && isServedSitemapFatal(v5.verdict)) {
+    ok('配信sitemap: 200 だが <loc> が1件も無い形を致命として検出')
+  } else bad(`空 sitemap の判定が想定外: ${JSON.stringify(v5)}`)
+
+  const v6 = served(xml([`${O}/`, 'https://evil.example.com/']))
+  if (v6.verdict === 'foreign' && v6.foreign.length === 1 && isServedSitemapFatal(v6.verdict)) {
+    ok('配信sitemap: 自オリジン外の loc が混ざる形を致命として検出')
+  } else bad(`別オリジンの判定が想定外: ${JSON.stringify(v6)}`)
+
+  // 別リポ配信(/egtype/)は自オリジン内なので foreign ではない。ここを落とすと常時 red になる。
+  const v7 = classifyServedSitemap({ status: 200, body: xml([`${O}/egtype/`, `${O}/egtype/blog/`]) },
+    { repoLocs: [], origin: O })
+  if (v7.verdict === 'ok') ok('配信sitemap: 同一オリジンの別リポ配信(/egtype/)は foreign にしない')
+  else bad(`別リポ配信の判定が想定外: ${JSON.stringify(v7)}`)
+
+  // 検知規則そのものの固定: 致命の集合が空へ退化すると、以降どんな壊れ方も警告止まりになる。
+  const fatalKinds = ['unreachable', 'not-xml', 'empty', 'foreign'].filter(isServedSitemapFatal)
+  const softKinds = ['pending-deploy', 'ok'].filter(isServedSitemapFatal)
+  if (fatalKinds.length === 4 && softKinds.length === 0) ok('配信sitemap: 致命/警告の振り分けが規則として固定されている')
+  else bad(`致命判定の集合が想定外: fatal=${JSON.stringify(fatalKinds)} soft=${JSON.stringify(softKinds)}`)
+}
+
+// 55 a11y 走査の母集団に components/ を含める(Day113)。
+//   Day104 のガードは app/ だけを見ていたが、実測では画面の実体は components/ 側に多く
+//   (featured-apps / footer / links-section 等)、アイコンだけのリンク/ボタンが最も生えやすいのも
+//   そちら。現時点の指摘は0件だが「今たまたま違反が無い」と「見ている」は別で、
+//   母集団に入っていない限り退行は永久に検知されない。
+{
+  const fx = fs.mkdtempSync(path.join(os.tmpdir(), 'links-a11y-'))
+  const write = (rel, src) => {
+    const full = path.join(fx, rel)
+    fs.mkdirSync(path.dirname(full), { recursive: true })
+    fs.writeFileSync(full, src)
+    return path.dirname(full)
+  }
+  const run = (env) => spawnSync(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--list'],
+    { encoding: 'utf8', env: { ...process.env, ...env } })
+
+  // (a) components/ に名前なしアイコンリンクを置くと落ちること（app/ は正本のまま）。
+  const badDir = write('bad/widget.tsx',
+    'export default function W() {\n  return <button onClick={x}><Icon className="w-4" /></button>\n}\n')
+  const rA = run({ LINKS_COMPONENTS_DIR: badDir })
+  if (rA.status === 1 && /名前なし\s+\[a11y\] components\/widget\.tsx/.test(rA.stdout)) {
+    ok('a11y: components/ の名前なしアイコンボタンを検出して exit 1(Day104 は app/ しか見ていなかった)')
+  } else bad(`components/ の a11y 違反が素通り: status=${rA.status}`)
+
+  // (b) 名前があれば落ちないこと（過剰検知だと components を母集団に入れた瞬間に常時 red）。
+  const okDir = write('good/widget.tsx',
+    'export default function W() {\n  return <button aria-label="閉じる"><Icon className="w-4" /></button>\n}\n')
+  const rB = run({ LINKS_COMPONENTS_DIR: okDir })
+  if (rB.status === 0 && !/\[a11y\]/.test(rB.stdout)) {
+    ok('a11y: aria-label があれば components/ でも素通りする(偽陽性なし)')
+  } else bad(`名前ありの components/ で誤検知: status=${rB.status}`)
+
+  // (c) 正本の components/ が現時点で違反ゼロであることを固定（退行の基準線）。
+  const rC = run({})
+  if (rC.status === 0 && !/\[a11y\]/.test(rC.stdout)) ok('a11y: 正本の app/ と components/ は違反ゼロ')
+  else bad(`正本で a11y 違反: status=${rC.status}`)
+
+  fs.rmSync(fx, { recursive: true, force: true })
+}
+
+// 54 配線(Day113): **本番配信を見る段**が本体に届いているか。
+//   既存の配線ガードは全て `--list` で走らせており、`--list` は fetch より前に exit する。
+//   つまり Day110 の「配信 robots.txt」と本日の「配信 sitemap.xml」は、純関数のテストはあっても
+//   **本体で致命化されているかを誰も見ていなかった**（純関数を呼び忘れても・呼んで結果を捨てても
+//   永久に緑）。ローカルの HTTP サーバを立てて `--base` で向け、実際の fetch 段を通して固定する。
+{
+  const fx = fs.mkdtempSync(path.join(os.tmpdir(), 'links-d113-'))
+  const write = (rel, src) => {
+    const full = path.join(fx, rel)
+    fs.mkdirSync(path.dirname(full), { recursive: true })
+    fs.writeFileSync(full, src)
+    return full
+  }
+  const O = 'https://egshugy.com'  // 正本 app/layout.tsx の metadataBase（申告はこの origin で書く）
+  const REPO_LOCS = [`${O}/`, `${O}/stamps/`]
+  const sitemapXml = (locs) =>
+    `<?xml version="1.0" encoding="UTF-8"?>\n<urlset>${locs.map((u) => `<url><loc>${u}</loc></url>`).join('')}</urlset>`
+  const robotsTxt = `User-agent: *\nAllow: /\nSitemap: ${O}/sitemap.xml\n`
+  const publicDir = path.join(fx, 'public')
+  fs.mkdirSync(publicDir, { recursive: true })
+  fs.writeFileSync(path.join(publicDir, 'sitemap.xml'), sitemapXml(REPO_LOCS))
+
+  // 配信側の応答を差し替えられるローカルサーバ。既定は「全部 200・正常」で、
+  // 検査したい1本だけを壊す（他の段の失敗が混ざると、何を証明したのか読めなくなるため）。
+  let serve = {}
+  const server = http.createServer((req, res) => {
+    const url = req.url.split('?')[0]
+    const custom = serve[url]
+    if (custom) {
+      res.writeHead(custom.status ?? 200, { 'content-type': custom.type ?? 'text/plain; charset=utf-8' })
+      res.end(custom.body ?? '')
+      return
+    }
+    if (url === '/robots.txt') {
+      res.writeHead(200, { 'content-type': 'text/plain' }); res.end(robotsTxt); return
+    }
+    if (url === '/sitemap.xml') {
+      res.writeHead(200, { 'content-type': 'application/xml' }); res.end(sitemapXml(REPO_LOCS)); return
+    }
+    // OG は画像として配信されていること（型なしだと別の段が致命化して原因が読めなくなる）
+    if (/opengraph-image|twitter-image|\.png$/.test(url)) {
+      res.writeHead(200, { 'content-type': 'image/png' }); res.end('x'); return
+    }
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end('<!doctype html><html><body>ok</body></html>')
+  })
+  await new Promise((r) => server.listen(0, '127.0.0.1', r))
+  const BASE = `http://127.0.0.1:${server.address().port}`
+  // **spawnSync は使えない**: 同期 spawn はイベントループを止めるので、同じプロセスで動く
+  // このローカルサーバが応答できず、check-links 側の fetch が待ち続ける（実際に最初そうなった）。
+  // 非同期 spawn にして、子プロセスの実行中もサーバが応答できるようにする。
+  const run = (env = {}) => new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--base', BASE],
+      { env: { ...process.env, LINKS_ROBOTS: write('robots.txt', robotsTxt), LINKS_PUBLIC_DIR: publicDir, ...env } })
+    let stdout = ''
+    child.stdout.on('data', (d) => { stdout += d })
+    child.stderr.on('data', (d) => { stdout += d })
+    child.on('close', (status) => resolve({ status, stdout }))
+  })
+
+  // (a) 偽陽性の対照を先に置く。ここが赤いと以下の (b)(c) は「常に落ちる実装」でも通ってしまう。
+  serve = {}
+  const rOk = await run()
+  if (!/\[配信sitemap\]/.test(rOk.stdout) && !/\[robots\]/.test(rOk.stdout)) {
+    ok('配線: 配信物が正常なら配信 sitemap/robots の段は何も言わない(偽陽性なし)')
+  } else bad(`正常な配信で誤検知: ${rOk.stdout.split('\n').filter((l) => /配信sitemap|\[robots\]/.test(l)).join(' / ')}`)
+
+  // (b) 200 だが HTML（SPA フォールバック）＝クローラは sitemap として読めない。
+  serve = { '/sitemap.xml': { type: 'text/html', body: '<!doctype html><html><body>portal</body></html>' } }
+  const rHtml = await run()
+  if (rHtml.status === 1 && /✗ not-xml\s+\[配信sitemap\]/.test(rHtml.stdout)) {
+    ok('配線: 配信 sitemap が HTML を返す形で exit 1(本番配信の検査が本体に届いている)')
+  } else bad(`配信 sitemap ガードが本体で効いていない: status=${rHtml.status}`)
+
+  // (c) 申告した入口が本番で死んでいる（robots.txt は生きているのに sitemap だけ 404）。
+  serve = { '/sitemap.xml': { status: 404, body: 'not found' } }
+  const r404 = await run()
+  if (r404.status === 1 && /✗ unreachable\s+\[配信sitemap\]/.test(r404.stdout)) {
+    ok('配線: 申告した sitemap が本番で 404 なら exit 1')
+  } else bad(`404 の配信 sitemap が致命化されていない: status=${r404.status}`)
+
+  // (d) デプロイ遅れ（リポにあって本番に無い）は警告に留まり exit 0 のままであること。
+  //     ここを致命にすると人間ゲートのデプロイ待ちで毎日 red になり、検査ごと捨てられる。
+  //     判定は status ではなく**この段が致命に寄与していないこと**で見る。check-links は外部
+  //     ドメイン(gtag 等)も叩くので、実測でそこが一時的に落ちると status が 1 になり、
+  //     本題と無関係な理由でこのケースだけが赤くなる（実際に一度そうなった）。
+  serve = { '/sitemap.xml': { type: 'application/xml', body: sitemapXml([`${O}/`]) } }
+  const rPending = await run()
+  const pendingNoted = /ⓘ 配信sitemap .*本番の sitemap に無い/.test(rPending.stdout)
+  const sitemapBlamed = /✗ \S+\s+\[配信sitemap\]/.test(rPending.stdout) || /致命.*配信sitemap/.test(rPending.stdout)
+  if (pendingNoted && !sitemapBlamed) {
+    ok('配線: リポにあって本番に無い loc は警告に留まり致命の理由にならない(デプロイ待ちで false-red にしない)')
+  } else bad(`デプロイ待ちの扱いが想定外: pending=${pendingNoted} blamed=${sitemapBlamed}`)
+
+  // (e) Day110 の配信 robots も同じ理由で未配線だった。全面拒否が致命化されることを固定する。
+  serve = { '/robots.txt': { body: `User-agent: *\nDisallow: /\nSitemap: ${O}/sitemap.xml\n` } }
+  const rBlock = await run()
+  if (rBlock.status === 1 && /✗ 全面拒否\s+\[robots\]/.test(rBlock.stdout)) {
+    ok('配線: 配信 robots.txt の全面拒否で exit 1(Day110 の段も本体に届いている)')
+  } else bad(`配信 robots ガードが本体で効いていない: status=${rBlock.status}`)
+
+  // (f) floor: 自オリジンの sitemap 申告が0件なら、この段は何も検査していない。
+  //     実測: 現在の規約では**上の静的 robots 段が先に落とす**（別オリジンだけの宣言は
+  //     「別オリジン」不整合、宣言0件は Day110 の floor）。この段の floor はそこへ到達しないが、
+  //     前段がゆるめられたときに**この段だけ無言で空になる**のを防ぐ保険として残している。
+  //     ここで固定するのは「母集団が空になる入力は、どの層かはともかく必ず exit 1 になる」こと。
+  serve = {}
+  const rFloor = await run({ LINKS_ROBOTS: write('robots-nosm.txt', `User-agent: *\nAllow: /\nSitemap: https://other.example.com/sitemap.xml\n`) })
+  const floorNamed = /配信 sitemap 検査の母集団が0件|自オリジンの sitemap 申告を1件も導けない|別オリジン\s+\[robots\]/.test(rFloor.stdout)
+  if (rFloor.status === 1 && floorNamed) {
+    ok('配線: 自オリジンの sitemap 申告が0件になる入力は必ず exit 1(層は前段でも名指しされる)')
+  } else bad(`母集団が空になる入力が素通り: status=${rFloor.status}`)
+
+  server.closeAllConnections?.()
+  server.close()
   fs.rmSync(fx, { recursive: true, force: true })
 }
 

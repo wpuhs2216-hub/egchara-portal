@@ -551,6 +551,65 @@ export function classifyServedRobots({ status, body }, declaredSitemapUrls = [])
   return { verdict: 'ok', servedSitemaps, missingOnProd, blockedBy: null }
 }
 
+// --- 本番で配信されている sitemap.xml の中身(Day113) ---
+// Day107 は sitemap.xml の**中身**を、Day110 はその**入口**(robots.txt の Sitemap 宣言)を固定した。
+// だが固定したのはどちらも**リポの中身**で、実際に配信されている sitemap は誰も見ていなかった。
+// Day110 で robots.txt について実測したとおり、本番の配信物はリポと同じとは限らない
+// (前置きが入る／デプロイが遅れる／配信側が別物を返す)。しかも 200 は返るので、
+// res.ok しか見ない従来の検査には永久に映らない（Day104 の OG content-type と同型）。
+//
+// 実測(Day113): 本番 `/sitemap.xml` の <loc> は3件で、リポにある `/noxa/` が**無い**
+// （Day107 の修正が未反映＝人間ゲートのデプロイ待ち）。この状態は「壊れている」のではなく
+// 「まだ届いていない」なので**警告**に留める。致命にすると毎日 red になり検査ごと捨てられる。
+//
+// 逆に、デプロイ遅れでは説明できない状態＝**配信側が壊している**ものだけを致命にする:
+//   ・申告した入口が本番で取得できない(robots.txt は生きているのに sitemap だけ死んでいる)
+//   ・200 なのに <loc> が1件も無い(空 or sitemap の体を成していない)
+//   ・200 なのに HTML が返る(SPA フォールバックが拡張子付き URL まで飲み込んでいる形。
+//     クローラは sitemap として読めないので、申告した意味が丸ごと消える)
+//   ・自オリジン外の loc が混ざる(別サイトを索引へ差し出している)
+const SITEMAP_HTML_RE = /<html[\s>]/i
+
+/**
+ * 本番で配信されている sitemap 1件を分類する。
+ * @param res       fetchWithRetry({ wantBody: true }) の戻り（status/body/contentType）
+ * @param repoLocs  リポの同じ sitemap が持つ <loc> 全件（stale 判定の基準。空なら比較しない）
+ * @param origin    自サイトの origin（末尾スラッシュ無し）
+ * @param crossRepoPrefixes 別リポ配信の接頭辞（自オリジン内なので foreign ではない）
+ * @returns { verdict, servedLocs, missingOnProd, foreign }
+ *   verdict: unreachable | not-xml | empty | foreign | pending-deploy | ok
+ */
+export function classifyServedSitemap({ status, body, contentType } = {}, { repoLocs = [], origin } = {}) {
+  if (status !== 200 || typeof body !== 'string') {
+    return { verdict: 'unreachable', servedLocs: [], missingOnProd: [], foreign: [], contentType }
+  }
+  const servedLocs = [...body.matchAll(SITEMAP_LOC_RE)].map((m) => m[1].trim())
+  // <loc> が無い理由を分ける。HTML が返っているなら「配信側が別物を返した」と言い切れる。
+  if (servedLocs.length === 0) {
+    const verdict = SITEMAP_HTML_RE.test(body) ? 'not-xml' : 'empty'
+    return { verdict, servedLocs, missingOnProd: [], foreign: [], contentType }
+  }
+  const foreign = origin
+    ? servedLocs.filter((u) => u !== origin && !u.startsWith(`${origin}/`))
+    : []
+  if (foreign.length > 0) {
+    return { verdict: 'foreign', servedLocs, missingOnProd: [], foreign, contentType }
+  }
+  // リポにあって本番に無い＝デプロイ待ち（逆向き＝本番にあってリポに無い、も同じくデプロイ遅れで
+  // 説明がつく。どちらも「壊れている」ではないので警告側に置く）。
+  const served = new Set(servedLocs)
+  const missingOnProd = repoLocs.filter((u) => !served.has(u))
+  if (missingOnProd.length > 0) {
+    return { verdict: 'pending-deploy', servedLocs, missingOnProd, foreign, contentType }
+  }
+  return { verdict: 'ok', servedLocs, missingOnProd, foreign, contentType }
+}
+
+/** 配信 sitemap の verdict が「配信側の破損」か（デプロイ遅れでは説明できないか） */
+export function isServedSitemapFatal(verdict) {
+  return verdict === 'unreachable' || verdict === 'not-xml' || verdict === 'empty' || verdict === 'foreign'
+}
+
 // --- Service Worker ブートストラップの巻き添え(Day107) ---
 // 実測: `app/layout.tsx` の SW ブートストラップは
 //   getRegistrations().then(rs => Promise.all(rs.map(r => r.unregister())))
