@@ -14,7 +14,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fetchWithRetry } from './fetch-with-retry.mjs'
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, CROSS_REPO_PREFIXES, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes, findRobotsSitemapIssues, classifyServedRobots, classifyServedSitemap, isServedSitemapFatal } from './lib/extract-targets.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, CROSS_REPO_PREFIXES, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes, findRobotsSitemapIssues, classifyServedRobots, classifyServedSitemap, isServedSitemapFatal, partitionLinkResults } from './lib/extract-targets.mjs'
 import { simulateSwActivate } from './lib/sw-activate-sim.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -24,6 +24,7 @@ const baseIdx = process.argv.indexOf('--base')
 const baseArg = baseIdx > -1 ? process.argv[baseIdx + 1] : null
 if (baseIdx > -1 && !baseArg) { console.error('--base にはURLを指定してください'); process.exit(2) }
 const BASE = (baseArg ?? 'https://egshugy.com').replace(/\/$/, '')
+
 
 // あるコンポーネントが app/ の実ルートから import され実際にレンダーされているか。
 // import されていない = デッドコンポーネント(未レンダー)で、その内部リンクは live サイトの
@@ -176,7 +177,8 @@ const externals = extractExternalUrls(liveSrc, { exclude: EXCLUDE })
 // 単発フレークで死活監視が「致命」誤警報を出すのを防ぐ(恒久404はリトライせず即検知)。
 async function check(url) {
   const r = await fetchWithRetry(url)
-  return { url, status: r.status, ok: r.ok, err: r.err }
+  // challenged: bot 対策に阻まれて生死が測れない応答(Day116)。ok でも失敗でもない第三の状態。
+  return { url, status: r.status, ok: r.ok, err: r.err, errCode: r.errCode ?? null, challenged: Boolean(r.challenged) }
 }
 
 // カテゴリ分離: portal自前で常時live であるべきもの(hard)と、egtype の別デプロイに
@@ -718,21 +720,45 @@ const servedSitemapFatal = servedSitemapBad.length > 0
 
 const robotsFatal = servedRobots.verdict === 'blocks-all' || servedRobots.verdict === 'no-sitemap'
 
-const hardBad = results.filter((r) => !r.ok && !r.soft)
-const softBad = results.filter((r) => !r.ok && r.soft)
+// bot 対策のチャレンジに阻まれた応答(Day116)は「失敗」ではなく**判定不能**として分ける。
+// 実測: 外部リンク https://nomishugy.vercel.app/coming-soon はブラウザ UA なら 200 だが
+// 監視の UA では 403 + `x-vercel-mitigated: challenge`(Vercel の Attack Challenge)。
+// リンクは生きていて実ユーザーには見えるのに、監視だけが恒常的に致命を出し cron が毎日 red
+// になっていた。false-red は本物のリンク切れを埋もれさせるので分ける必要がある。
+//   - 外部(portal では直せない相手側の設定)  … 警告のみ。Day101 の soft と同じ思想
+//   - 自前(portal 配信)                      … **致命**。自分のサイトの死活が測れない状態を
+//     緑にしたら死活監視の意味が消えるし、設定は自分で直せる
+// 「403 を許す」形にはしない(本物の権限エラー・公開停止を見逃す)。チャレンジであることを
+// 名乗るヘッダがある応答だけを、この経路へ落とす(判定は isBotChallenge)。
+const { hardBad, softBad, challengedExternal, externalBlind } = partitionLinkResults(results, { externalCount: externalTargets.length })
 
-for (const r of hardBad) console.log(`  ✗ ${r.status || r.err}  [${r.cat}] ${r.url}`)
-for (const r of softBad) console.log(`  ⚠ ${r.status || r.err}  [${r.cat}] ${r.url}`)
+// 失敗の見出しは「ステータス、無ければ例外名(原因コード)」。素の TypeError だけでは
+// 相手が落ちているのか DNS なのか自分の回線なのかが分からない(Day116)。
+const label = (r) => `${r.status || `${r.err}${r.errCode ? `(${r.errCode})` : ''}`}`
+for (const r of hardBad) console.log(`  ✗ ${label(r)}  [${r.cat}] ${r.url}${r.challenged ? '（bot対策のチャレンジ＝自前の死活が測れない）' : ''}`)
+for (const r of softBad) console.log(`  ⚠ ${label(r)}  [${r.cat}] ${r.url}`)
+for (const r of challengedExternal) console.log(`  ⚠ bot対策  [${r.cat}] ${r.url} は ${r.status} + チャレンジ応答＝到達性が判定不能(実ユーザーのブラウザでは開けている可能性が高い)`)
+if (challengedExternal.length > 0) {
+  console.log(`[check-links] ⚠ 外部 ${challengedExternal.length}/${externalTargets.length} 件が bot 対策で判定不能 — 相手側の設定なので portal では直せない＝致命にしない(生死の確認は人手で)。`)
+}
+// floor: 外部の全件がチャレンジで判定不能なら、この段は**何も検査していない**のと同じ。
+// 「判定不能を警告に落とす」逃がし弁が広がりすぎて検知が空洞化した状態を緑にしない。
+if (externalBlind) {
+  console.log(`  ✗ 全件判定不能  [外部] 外部リンク ${externalTargets.length}件すべてが bot 対策で測れない（監視が外部について何も言えていない）`)
+}
 
 if (softBad.length > 0) {
   console.log(`[check-links] ⚠ egtype依存(soft) ${softBad.length}/${softTargets.length} 件が未到達 — egtype 本番デプロイ待ちなら想定内(portal と egtype はセットでデプロイ)。デプロイ後は --strict で厳格確認。`)
 }
 
-const fatal = hardBad.length > 0 || localMissing.length > 0 || ogBadType.length > 0 || robotsFatal || servedSitemapFatal || (STRICT && softBad.length > 0)
+const fatal = hardBad.length > 0 || localMissing.length > 0 || ogBadType.length > 0 || robotsFatal || servedSitemapFatal || externalBlind || (STRICT && softBad.length > 0)
 const robotsLabel = `robots ${servedRobots.verdict === 'ok' ? `申告${servedRobots.servedSitemaps.length}件が本番にも実在` : servedRobots.verdict}`
 const ogOkLabel = `OG配信 ${ogResults.filter((r) => r.verdict === 'ok').length}/${ogRoutes.length}件が image/*`
 const sitemapLabel = `配信sitemap ${servedSitemapChecks.filter((c) => c.verdict === 'ok').length}/${servedSitemapChecks.length}件が本番でもリポと一致`
-if (!fatal && hardBad.length === 0 && softBad.length === 0) {
+// 判定不能を「OK」に数えない(Day116)。チャレンジで測れなかった分がある回に「全件 OK」と
+// 名乗ると、監視が見ていないものまで見たことになる＝Day101 の集計の嘘の作り直しになる。
+const challengeLabel = challengedExternal.length > 0 ? ` / 外部 ${challengedExternal.length}件は bot対策で判定不能` : ''
+if (!fatal && hardBad.length === 0 && softBad.length === 0 && challengedExternal.length === 0) {
   console.log(`[check-links] ✓ 全${results.length}件 OK / ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合 / ${ogOkLabel} / ${robotsLabel} / ${sitemapLabel}`)
   process.exit(0)
 } else if (!fatal) {
@@ -740,9 +766,9 @@ if (!fatal && hardBad.length === 0 && softBad.length === 0) {
   // 従来は分母に egtype 配信の33件(キャラ画像32 + /egtype/)が混ざっており、hard で通った
   // 件数をそのまま「自前」と称していた＝集計の嘘だった。PM で外部リンクも分けた(hard では
   // あるが portal 自前ではない。混ぜると同じ嘘の作り直しになる)。
-  console.log(`[check-links] ✓ portal自前 ${portalTargets.length}/${portalTargets.length} 件 + 外部 ${externalTargets.length}件 OK（egtype配信 soft ${softTargets.length}件中 ${softBad.length}件未到達＝警告のみ）/ ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合 / ${ogOkLabel} / ${robotsLabel} / ${sitemapLabel}`)
+  console.log(`[check-links] ✓ portal自前 ${portalTargets.length}/${portalTargets.length} 件 + 外部 ${externalTargets.length - challengedExternal.length}/${externalTargets.length}件 OK（egtype配信 soft ${softTargets.length}件中 ${softBad.length}件未到達＝警告のみ）${challengeLabel} / ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合 / ${ogOkLabel} / ${robotsLabel} / ${sitemapLabel}`)
   process.exit(0)
 } else {
-  console.log(`[check-links] ✗ 致命 ${hardBad.length}件${localMissing.length ? ` + ローカル静的欠落 ${localMissing.length}件` : ''}${ogBadType.length ? ` + OG配信の型なし ${ogBadType.length}件` : ''}${robotsFatal ? ` + robots(${servedRobots.verdict})` : ''}${servedSitemapFatal ? ` + 配信sitemap ${servedSitemapBad.length}件` : ''}${STRICT ? ` + soft ${softBad.length}件` : ''} / 全${results.length}件`)
+  console.log(`[check-links] ✗ 致命 ${hardBad.length}件${externalBlind ? ' + 外部が全件判定不能' : ''}${localMissing.length ? ` + ローカル静的欠落 ${localMissing.length}件` : ''}${ogBadType.length ? ` + OG配信の型なし ${ogBadType.length}件` : ''}${robotsFatal ? ` + robots(${servedRobots.verdict})` : ''}${servedSitemapFatal ? ` + 配信sitemap ${servedSitemapBad.length}件` : ''}${STRICT ? ` + soft ${softBad.length}件` : ''} / 全${results.length}件`)
   process.exit(1)
 }

@@ -10,6 +10,8 @@
 // fetchImpl / sleep を注入可能にしてあるのは、selftest-check-links.mjs が実ネットワーク無しで
 // リトライ挙動を決定的に検証できるようにするため。
 
+import { CHALLENGE_HEADERS, isBotChallenge } from './lib/extract-targets.mjs'
+
 // そのステータスが「一時的(リトライで回復しうる)」か。
 //   0     = catch されたネットワークエラー/タイムアウト(check が status:0 で表現)
 //   429   = レート制限(時間を置けば通る)
@@ -47,12 +49,22 @@ export async function fetchWithRetry(url, {
       // content-type も返す(Day104)。res.ok だけを見ていた頃は「200 だが型ヘッダが無い」
       // OG 画像の配信欠陥を、対象に載せても検知できなかった。headers を持たないモック
       // (selftest)でも落ちないよう任意連鎖で読む。
-      result = { url, status: res.status, ok: res.ok, attempts: attempt, contentType: res.headers?.get?.('content-type') ?? null }
+      // bot 対策のチャレンジ判定に必要なヘッダも拾う(Day116)。ステータスだけでは
+      // 「本物の 403」と「チャレンジに阻まれて生死が測れない 403」を区別できない。
+      const challengeHeaders = {}
+      for (const h of CHALLENGE_HEADERS) {
+        const v = res.headers?.get?.(h)
+        if (v != null) challengeHeaders[h] = v
+      }
+      result = { url, status: res.status, ok: res.ok, attempts: attempt, contentType: res.headers?.get?.('content-type') ?? null, challengeHeaders, challenged: isBotChallenge({ status: res.status, challengeHeaders }) }
       // 本文の取得失敗(接続断など)は「取得できなかった」として扱う。ここで throw させると
       // 一時失敗のリトライ経路へ乗るので、下の catch に任せる。
       if (wantBody) result.body = await res.text?.()
     } catch (e) {
-      result = { url, status: 0, ok: false, err: e.name, attempts: attempt }
+      // 原因コード(ECONNREFUSED/ENOTFOUND/UND_ERR_CONNECT_TIMEOUT 等)まで持つ(Day116)。
+      // 素の `TypeError` だけでは「相手が落ちている」「DNS が引けない」「こちらの回線が
+      // 詰まっている」を区別できず、監視ログを見ても次の手が決まらない。
+      result = { url, status: 0, ok: false, err: e.name, errCode: e.cause?.code ?? null, attempts: attempt }
     }
     // 成功／恒久失敗／リトライ上限 のいずれかなら確定
     if (result.ok || !isTransientStatus(result.status) || attempt > retries) return result

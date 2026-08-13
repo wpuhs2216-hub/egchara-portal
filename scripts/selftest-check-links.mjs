@@ -26,7 +26,7 @@ import { fetchWithRetry, isTransientStatus } from './fetch-with-retry.mjs'
 // ための逃がし弁で、従来はカテゴリごとの手書きリテラルだったため実際の配信主体とずれていた
 // (同じ /egtype/ 依存で画像は hard・型ページは soft)。URL 由来の述語に変えた分、今度は
 // 「接頭辞を広げれば自前のリンク切れまで警告のみにできる」経路が生まれるので、そこも押さえる。
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes, findRobotsSitemapIssues, classifyServedRobots, parseRobotsGroups, classifyServedSitemap, isServedSitemapFatal } from './lib/extract-targets.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes, findRobotsSitemapIssues, classifyServedRobots, parseRobotsGroups, classifyServedSitemap, isServedSitemapFatal, isBotChallenge, partitionLinkResults } from './lib/extract-targets.mjs'
 //
 // 追加(Day110): SW の後片付けを「書き方」ではなく「**実際に何を消したか**」で固定する。
 // Day107 の静的規則は `caches.keys()` の結果を絞らず delete する形を黒としたが、実害として
@@ -1411,6 +1411,87 @@ self.addEventListener('fetch', (event) => {
   server.closeAllConnections?.()
   server.close()
   fs.rmSync(fx, { recursive: true, force: true })
+}
+
+// 56 bot 対策のチャレンジ(Day116・純関数)。「403 が返った」だけでは、本物の権限エラーと
+//   「実ユーザーには見えているのに監視だけが弾かれている」を区別できない。実測: portal が
+//   3箇所から張る https://nomishugy.vercel.app/coming-soon はブラウザ UA では 200、監視の
+//   UA では 403 + `x-vercel-mitigated: challenge`。恒常的な false-red は本物のリンク切れを
+//   埋もれさせるので分ける必要があるが、**403 を丸ごと許す形にはしない**(公開停止を見逃す)。
+{
+  const cases = [
+    [{ status: 403, challengeHeaders: { 'x-vercel-mitigated': 'challenge' } }, true, 'Vercel の Attack Challenge(実測された形)'],
+    [{ status: 403, challengeHeaders: { 'x-vercel-challenge-token': 'abc' } }, true, 'チャレンジトークンだけが付く形'],
+    [{ status: 503, challengeHeaders: { 'cf-mitigated': 'challenge' } }, true, 'Cloudflare のチャレンジ(503)'],
+    [{ status: 429, challengeHeaders: { 'cf-chl-bypass': '1' } }, true, 'Cloudflare のチャレンジページ(429)'],
+    [{ status: 403, challengeHeaders: {} }, false, '素の 403 は本物の権限エラー＝許さない'],
+    [{ status: 404, challengeHeaders: { 'x-vercel-mitigated': 'challenge' } }, false, '404 はチャレンジの有無に関わらずリンク切れ'],
+    [{ status: 200, challengeHeaders: { 'x-vercel-mitigated': 'challenge' } }, false, '中身が返っているなら判定不能ではない'],
+    [{ status: 403, challengeHeaders: { 'x-vercel-mitigated': 'block' } }, false, 'block(恒久遮断)はチャレンジではない'],
+  ]
+  const bads = []
+  for (const [res, want, why] of cases) {
+    if (isBotChallenge(res) !== want) bads.push(`${why}: 期待${want}`)
+  }
+  if (bads.length === 0) ok('bot対策: チャレンジ応答だけを「判定不能」と認め、素の 403/404/200 は従来どおり扱う')
+  else bad(`チャレンジ判定がずれている: ${bads.join(' / ')}`)
+
+  // fetchWithRetry がヘッダを拾って challenged を立てるか（本体はこのフラグしか見ない）。
+  const chalFetch = async () => ({ status: 403, ok: false, headers: { get: (h) => (h === 'x-vercel-mitigated' ? 'challenge' : null) } })
+  const r = await fetchWithRetry('https://x.test/', { fetchImpl: chalFetch, sleep: noSleep })
+  if (r.challenged === true && r.status === 403) ok('bot対策: fetch 層がチャレンジヘッダを拾って challenged を立てる')
+  else bad(`fetch 層が challenged を立てていない: ${JSON.stringify(r)}`)
+
+  // 素の 403 は challenged にしない（fetch 層が緩いと下流の分類が全部意味を失う）。
+  const plain403 = async () => ({ status: 403, ok: false, headers: { get: () => null } })
+  const r2 = await fetchWithRetry('https://x.test/', { fetchImpl: plain403, sleep: noSleep })
+  if (r2.challenged === false) ok('bot対策: 素の 403 は challenged にしない(検知力を落とさない)')
+  else bad('素の 403 が challenged になっている')
+
+  // 例外の原因コードまで持つか。素の TypeError だけでは「相手が落ちている」「DNS」「自分の回線」を
+  // 区別できず、監視ログを見ても次の手が決まらない(実測: gtag が TypeError(ECONNREFUSED) で落ちた)。
+  const boom = async () => { const e = new TypeError('fetch failed'); e.cause = { code: 'ECONNREFUSED' }; throw e }
+  const r3 = await fetchWithRetry('https://x.test/', { fetchImpl: boom, sleep: noSleep, retries: 0 })
+  if (r3.err === 'TypeError' && r3.errCode === 'ECONNREFUSED') ok('bot対策: 例外の原因コード(ECONNREFUSED 等)を持ち帰る(壊れ方に名前をつける)')
+  else bad(`原因コードが落ちている: ${JSON.stringify(r3)}`)
+}
+
+// 57 死活結果の振り分け(Day116・純関数)。誰が直せるかで分ける規則そのものを固定する。
+//   条件が1つずれて「全部警告」に倒れても出力は緑のまま変わらないため、本体のフィルタ式に
+//   散らしたままにはできない。
+{
+  const R = (o) => ({ ok: false, url: 'u', cat: 'c', ...o })
+  const okR = { ok: true, owner: 'external', url: 'u', cat: 'c' }
+
+  const a = partitionLinkResults([R({ owner: 'external', challenged: true }), okR], { externalCount: 2 })
+  if (a.hardBad.length === 0 && a.challengedExternal.length === 1 && !a.externalBlind) {
+    ok('振り分け: 外部のチャレンジは致命にせず「判定不能」として別に数える(相手側の設定は直せない)')
+  } else bad(`外部チャレンジの振り分けが想定外: ${JSON.stringify({ hard: a.hardBad.length, chal: a.challengedExternal.length })}`)
+
+  const b = partitionLinkResults([R({ owner: 'portal', challenged: true })], { externalCount: 1 })
+  if (b.hardBad.length === 1) {
+    ok('振り分け: 自前のチャレンジは致命（自分のサイトの死活が測れない状態を緑にしない・設定は自分で直せる）')
+  } else bad(`自前チャレンジが致命化されていない: ${JSON.stringify(b.hardBad)}`)
+
+  const c = partitionLinkResults([R({ owner: 'external', status: 403 })], { externalCount: 1 })
+  if (c.hardBad.length === 1 && c.challengedExternal.length === 0) {
+    ok('振り分け: チャレンジでない外部の失敗は従来どおり致命(403 を丸ごと許す形にしない)')
+  } else bad(`素の外部失敗の扱いが想定外: ${JSON.stringify(c.hardBad.length)}`)
+
+  const d = partitionLinkResults([R({ owner: 'egtype', soft: true, challenged: true })], { externalCount: 1 })
+  if (d.softBad.length === 0 && d.hardBad.length === 0) {
+    ok('振り分け: soft のチャレンジは未到達にも数えない(デプロイ待ちの件数を判定不能で水増ししない)')
+  } else bad(`soft チャレンジの扱いが想定外: ${JSON.stringify({ soft: d.softBad.length, hard: d.hardBad.length })}`)
+
+  // floor: 外部が全件判定不能なら、外部リンクについて監視は何も言えていない。
+  const e = partitionLinkResults(
+    [R({ owner: 'external', challenged: true }), R({ owner: 'external', challenged: true })], { externalCount: 2 })
+  if (e.externalBlind) ok('振り分け: 外部が全件判定不能なら floor が立つ(逃がし弁の空洞化を緑にしない)')
+  else bad('外部全件判定不能の floor が立たない')
+
+  if (!partitionLinkResults([], { externalCount: 0 }).externalBlind) {
+    ok('振り分け: 外部リンクが0件のときは floor を立てない(母集団ゼロを異常と混同しない)')
+  } else bad('外部0件で floor が誤爆')
 }
 
 console.log(`\n[selftest-check-links] 結果: pass=${pass} fail=${fail}`)

@@ -662,3 +662,59 @@ export function findOriginWideSwWipes(entries) {
   }
   return { offenders, scanned }
 }
+
+// --- bot 対策のチャレンジで阻まれた応答(Day116) ---
+// 実測: portal がトップ・NOXA ページ・フッターの3箇所から張っている
+// `https://nomishugy.vercel.app/coming-soon` は、ブラウザの UA では 200 を返すのに
+// 死活監視の UA では **403 + `x-vercel-mitigated: challenge`**（Vercel の Attack Challenge）。
+// リンクは生きていて実ユーザーには見えるのに、監視だけが恒常的に 403 を掴み hard 致命 →
+// cron が毎日 red になる。false-red は「本物のリンク切れを埋もれさせる」ので、Day85 の
+// 一時失敗と同じく**検知力を落とさずに分ける**必要がある。
+//
+// ただし「403 を許す」形にはしない。それでは本物の権限エラー・公開停止まで見逃す。
+// **チャレンジであることを名乗るヘッダがある応答だけ**を別状態として持つ
+// （Day114 の「異常を値として持てるか」・Day108 の「正常な空と壊れた空を同じ値で表さない」と同系列）。
+// 到達性の判定は「不能」であって「OK」ではないので、呼び出し側は緑と混ぜず警告として出すこと。
+export const CHALLENGE_HEADERS = [
+  'x-vercel-mitigated',      // Vercel: challenge / block
+  'cf-mitigated',            // Cloudflare: challenge
+  'x-vercel-challenge-token',// Vercel: チャレンジ本体が返るときのトークン
+  'cf-chl-bypass',           // Cloudflare: チャレンジページの目印
+]
+// チャレンジで返りうるステータス。200 は「中身が返っている」ので対象外
+// （チャレンジ HTML を 200 で返す構成もあるが、それを含めると本物の 200 まで
+//   判定不能に化けるため、ここでは踏み込まない）。
+const CHALLENGE_STATUSES = new Set([401, 403, 429, 503])
+
+/**
+ * bot 対策のチャレンジに阻まれた応答か（＝リンクの生死が判定できない状態）。
+ * @param status HTTP ステータス
+ * @param challengeHeaders 上記ヘッダ名 → 値（小文字キー・無いものは省略/null）
+ */
+export function isBotChallenge({ status, challengeHeaders = {} } = {}) {
+  if (!CHALLENGE_STATUSES.has(status)) return false
+  const mitigated = (challengeHeaders['x-vercel-mitigated'] ?? challengeHeaders['cf-mitigated'] ?? '').toString().toLowerCase()
+  if (mitigated === 'challenge') return true
+  return Boolean(challengeHeaders['x-vercel-challenge-token'] || challengeHeaders['cf-chl-bypass'])
+}
+
+/**
+ * 死活結果の振り分け(Day116)。「失敗」を1つの箱に入れず、**誰が直せるか**で分ける。
+ *   hardBad          … portal 自身が直せる失敗（判定不能な自前も含む＝死活が測れないのは異常）
+ *   softBad          … egtype 配信待ち（既存の逃がし弁）
+ *   challengedExternal … 外部が bot 対策で判定不能（相手側の設定＝portal では直せない・警告）
+ *   externalBlind    … 外部が**全件**判定不能（逃がし弁が広がって検知が空洞化した状態＝致命）
+ * 分類を本体のフィルタ式に散らすと、条件が1つずれただけで「全部警告」に倒れても
+ * 出力は緑のまま変わらない。ここに集約して規則そのものをテストできる形にする。
+ */
+export function partitionLinkResults(results, { externalCount = 0 } = {}) {
+  const challengedExternal = results.filter((r) => !r.ok && r.challenged && r.owner === 'external')
+  const hardBad = results.filter((r) => !r.ok && !r.soft && !(r.challenged && r.owner === 'external'))
+  const softBad = results.filter((r) => !r.ok && r.soft && !r.challenged)
+  return {
+    hardBad,
+    softBad,
+    challengedExternal,
+    externalBlind: externalCount > 0 && challengedExternal.length === externalCount,
+  }
+}
