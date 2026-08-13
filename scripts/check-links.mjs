@@ -14,7 +14,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fetchWithRetry } from './fetch-with-retry.mjs'
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, CROSS_REPO_PREFIXES, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes, findRobotsSitemapIssues, classifyServedRobots, classifyServedSitemap, isServedSitemapFatal, partitionLinkResults } from './lib/extract-targets.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, CROSS_REPO_PREFIXES, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, findRoutesNamingLayoutDefault, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes, findRobotsSitemapIssues, classifyServedRobots, classifyServedSitemap, isServedSitemapFatal, partitionLinkResults } from './lib/extract-targets.mjs'
 import { simulateSwActivate } from './lib/sw-activate-sim.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -324,6 +324,27 @@ if (a11yOffenders.length > 0) {
     process.exit(1)
   }
 
+  // 同じ欠陥はリダイレクトの有無と無関係に起きる(Day104 起票の横断・Day119 実装)。
+  // 自前の title/description を持たないルートは、レイアウト既定＝トップと同一のメタを
+  // 名乗る。`"use client"` のページは metadata を書けないので、同階層に layout.tsx を
+  // 足さない限り必ずこうなる（実測: /noxa/ は noxa/layout.tsx で健全、/ は対象外）。
+  const defaulted = findRoutesNamingLayoutDefault(routeDirs)
+  if (defaulted.length > 0) {
+    for (const d of defaulted) {
+      console.log(`  ✗ 既定メタ  [索引] ${d.route}: 自前の title/description が無くレイアウト既定(＝トップと同一)を名乗る(${d.files.join(', ')})`)
+    }
+    console.log(`[check-links] ✗ 致命: レイアウト既定メタをそのまま名乗るルート ${defaulted.length}件（"use client" のページは同階層に layout.tsx を置くか noindex を宣言すること）。`)
+    process.exit(1)
+  }
+  // floor: ルートの母集団が空なら、この2つのガードは何も見ていない。
+  // 実測(Day119): 現在の規約では **同じ入力に対し下の OG ルート抽出の floor が先に落とす**
+  // （app/ が空なら OG ファイルも0件になるため）。それでも残すのは、前段がゆるめられたときに
+  // **索引ガードだけが無言で空になる**のを防ぐため——Day113 の配信 sitemap floor と同じ扱いで、
+  // 「今は到達しない」と「置かなくてよい」は別（前段の厳しさに黙って依存しない）。
+  if (routeDirs.filter((d) => d.files.some((f) => /(?:^|\/)page\./.test(f.rel))).length === 0) {
+    console.log('[check-links] ✗ 致命: 索引ガードのルート母集団が0件（app/ の走査が壊れてガードが無言化した可能性）。')
+    process.exit(1)
+  }
 }
 
 

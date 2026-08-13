@@ -341,6 +341,37 @@ export function findRedirectStubsWithoutNoindex(routeDirs) {
   return out
 }
 
+// --- レイアウト既定メタをそのまま名乗るルートの横断(Day104 起票 → Day119 実装) ---
+// 上の findRedirectStubsWithoutNoindex は **即リダイレクトのスタブ**しか見ていない。
+// しかし「レイアウト既定＝トップと同一の title/description/OG を名乗る」という欠陥は
+// リダイレクトするかどうかとは無関係で、**自前の metadata を宣言していない全ルート**で起きる。
+// とくに `"use client"` のページは `export const metadata` を書けないので、同じ階層に
+// layout.tsx を足さない限り必ずこの状態になる（実測: /noxa/ は noxa/layout.tsx を持つので健全、
+// / はトップ自身なので既定を名乗って正しい）。
+// 現時点の違反は0件だが、「今たまたま違反が無い」と「見ている」は別（Day113 の a11y 母集団と
+// 同じ）。ルートを1つ足した瞬間に静かに重複コンテンツが生えるので、母集団をルート全体へ広げる。
+//
+// 判定: そのルートの page.* / layout.* のどこにも title または description の宣言が無ければ違反。
+//   - ルート直下(`/`)はレイアウト既定が自分自身の identity なので対象外
+//   - noindex を宣言しているルートは索引されないので対象外（重複コンテンツにならない）
+const OWN_META_RE = /(?:^|[\s{,])(?:title|description)\s*:/m
+
+/**
+ * routeDirs: [{ route: '/workspaces/', files: [{ rel, src }] }]
+ * 自前の title/description を1つも宣言せず、noindex でもないルートを返す。
+ */
+export function findRoutesNamingLayoutDefault(routeDirs) {
+  const out = []
+  for (const { route, files } of routeDirs) {
+    if (route === '/') continue                                   // トップは既定が自分の identity
+    if (!files.some((f) => /(?:^|\/)page\.(?:tsx|ts|jsx|js|mdx|md)$/.test(f.rel))) continue // ルートでない
+    if (files.some((f) => NOINDEX_RE.test(f.src))) continue        // 索引されないなら重複しない
+    if (files.some((f) => OWN_META_RE.test(f.src))) continue       // 自前のメタを持っている
+    out.push({ route, files: files.map((f) => f.rel) })
+  }
+  return out
+}
+
 // --- OG 画像の配信ヘッダ(Day104) ---
 // 実測: `HEAD https://egshugy.com/opengraph-image` は 200・content-length 358903 を返すのに
 // **content-type ヘッダが無い**(`/icon.png` は image/png)。`output: "export"` × ファイルベース OG は

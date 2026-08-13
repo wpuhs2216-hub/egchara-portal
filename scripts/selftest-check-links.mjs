@@ -26,7 +26,7 @@ import { fetchWithRetry, isTransientStatus } from './fetch-with-retry.mjs'
 // ための逃がし弁で、従来はカテゴリごとの手書きリテラルだったため実際の配信主体とずれていた
 // (同じ /egtype/ 依存で画像は hard・型ページは soft)。URL 由来の述語に変えた分、今度は
 // 「接頭辞を広げれば自前のリンク切れまで警告のみにできる」経路が生まれるので、そこも押さえる。
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes, findRobotsSitemapIssues, classifyServedRobots, parseRobotsGroups, classifyServedSitemap, isServedSitemapFatal, isBotChallenge, partitionLinkResults } from './lib/extract-targets.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, findRoutesNamingLayoutDefault, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes, findRobotsSitemapIssues, classifyServedRobots, parseRobotsGroups, classifyServedSitemap, isServedSitemapFatal, isBotChallenge, partitionLinkResults } from './lib/extract-targets.mjs'
 //
 // 追加(Day110): SW の後片付けを「書き方」ではなく「**実際に何を消したか**」で固定する。
 // Day107 の静的規則は `caches.keys()` の結果を絞らず delete する形を黒としたが、実害として
@@ -672,6 +672,26 @@ function walkRel(dir, prefix = '') {
   const rc = run(c)
   if (rc.status === 1 && /OG 画像ルートを1件も抽出できない/.test(rc.stdout)) ok('配線: OG ルート0件を致命化する floor が効いている')
   else bad(`OG floor が効いていない: status=${rc.status}`)
+
+  // (b2) Day119: リダイレクトしない普通のルートでも、自前メタが無ければ致命(Day104 起票の横断)。
+  //      (b) のスタブ検知は location.replace を含む形しか見ないので、これは別枝として固定する。
+  const b2 = path.join(fixtures, 'b2')
+  write('b2/page.tsx', '<Link href="/" aria-label="ホーム"><ArrowLeft /></Link>')
+  write('b2/opengraph-image.tsx', 'export default function OG() {}')
+  write('b2/noxa/page.tsx', '"use client"\nexport default function P(){return null}')
+  const rb2 = run(b2)
+  if (rb2.status === 1 && /既定メタ.*\/noxa\//.test(rb2.stdout)) ok('配線: 自前メタの無い普通のルートで exit 1(既定メタの横断ガードが本体に届いている)')
+  else bad(`既定メタガードが本体で効いていない: status=${rb2.status}`)
+
+  // (b3) 対照: 同階層に自前メタの layout.tsx を置けば通ること（常に落ちる実装なら (b2) は無意味）。
+  const b3 = path.join(fixtures, 'b3')
+  write('b3/page.tsx', '<Link href="/" aria-label="ホーム"><ArrowLeft /></Link>')
+  write('b3/opengraph-image.tsx', 'export default function OG() {}')
+  write('b3/noxa/page.tsx', '"use client"\nexport default function P(){return null}')
+  write('b3/noxa/layout.tsx', 'export const metadata = { title: "NOXA", description: "…" }')
+  const rb3 = run(b3)
+  if (!/既定メタ/.test(rb3.stdout)) ok('配線: 自前メタを持つルートは既定メタガードに引っかからない(偽陽性なし)')
+  else bad('自前メタを持つルートを誤検知している')
 
   // (d) 負のサニティ: 正本の app/ では 3 つとも素通りし、OG 対象が `# og` 行として出ること。
   //     行が出ない＝配線が切れていても (a)(b)(c) は全部通るため、ここまで見て初めて固定になる。
@@ -1638,6 +1658,68 @@ self.addEventListener('fetch', (event) => {
   server.closeAllConnections?.()
   server.close()
   fs.rmSync(fx, { recursive: true, force: true })
+}
+
+// 59 レイアウト既定メタをそのまま名乗るルート(Day104 起票 → Day119 実装・純関数)。
+//   既存の noindex ガードは即リダイレクトのスタブしか見ておらず、同じ欠陥が
+//   「自前メタを宣言していない普通のルート」で起きるのを誰も見ていなかった。
+{
+  const D = (route, files) => ({ route, files })
+  const F = (rel, src) => ({ rel, src })
+  const CLIENT_PAGE = '"use client"\nexport default function P(){return null}'
+
+  const a = findRoutesNamingLayoutDefault([D('/noxa/', [F('noxa/page.tsx', CLIENT_PAGE)])])
+  if (a.length === 1 && a[0].route === '/noxa/') {
+    ok('既定メタ: 自前の title/description が無いルートを違反として名指しする')
+  } else bad(`既定メタの検知漏れ: ${JSON.stringify(a)}`)
+
+  const b = findRoutesNamingLayoutDefault([D('/noxa/', [
+    F('noxa/page.tsx', CLIENT_PAGE),
+    F('noxa/layout.tsx', 'export const metadata = { title: "NOXA", description: "…" }'),
+  ])])
+  if (b.length === 0) ok('既定メタ: 同階層の layout.tsx が自前メタを持てば違反にしない(正本 /noxa/ の形)')
+  else bad(`layout.tsx の自前メタを見落としている: ${JSON.stringify(b)}`)
+
+  const c = findRoutesNamingLayoutDefault([D('/', [F('page.tsx', CLIENT_PAGE)])])
+  if (c.length === 0) ok('既定メタ: トップは既定が自分の identity なので対象外(誤検知しない)')
+  else bad('トップを違反にしている')
+
+  const d = findRoutesNamingLayoutDefault([D('/workspaces/', [
+    F('workspaces/page.tsx', CLIENT_PAGE),
+    F('workspaces/layout.tsx', 'export const metadata = { robots: { index: false, follow: false } }'),
+  ])])
+  if (d.length === 0) ok('既定メタ: noindex を宣言していれば索引されない＝重複コンテンツにならないので対象外')
+  else bad(`noindex を無視している: ${JSON.stringify(d)}`)
+
+  // page が無いディレクトリ(コンポーネント置き場等)はルートではないので対象外
+  const e = findRoutesNamingLayoutDefault([D('/_parts/', [F('_parts/card.tsx', 'export const x = 1')])])
+  if (e.length === 0) ok('既定メタ: page.* が無いディレクトリはルートでないので対象外')
+  else bad('非ルートを違反にしている')
+
+  // 正本の app/ を実走査して現時点の違反が0件であること(退行の基準線)。
+  // 「今たまたま違反が無い」と「見ている」は別なので、上の検知テストと必ず対で置く。
+  {
+    const appDir = path.join(__dirname, '..', 'app')
+    const byDir = new Map()
+    const walk = (dir, prefix = '') => {
+      for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+        const rel = prefix ? `${prefix}/${ent.name}` : ent.name
+        if (ent.isDirectory()) walk(path.join(dir, ent.name), rel)
+        else if (/\.tsx?$/.test(ent.name)) {
+          const d = rel.split('/').slice(0, -1).join('/')
+          if (!byDir.has(d)) byDir.set(d, [])
+          byDir.get(d).push({ rel, src: fs.readFileSync(path.join(dir, ent.name), 'utf8') })
+        }
+      }
+    }
+    walk(appDir)
+    const dirs = [...byDir.entries()].map(([d, files]) => ({ route: `/${d ? `${d}/` : ''}`, files }))
+    const real = dirs.filter((d) => d.files.some((f) => /(?:^|\/)page\./.test(f.rel)))
+    const off = findRoutesNamingLayoutDefault(dirs)
+    if (real.length > 0 && off.length === 0) {
+      ok(`既定メタ: 正本 app/ の実ルート ${real.length}件はいずれも既定メタを名乗っていない(退行の基準線)`)
+    } else bad(`正本 app/ に違反あり or 母集団が空: 母集団=${real.length} 違反=${JSON.stringify(off.map((o) => o.route))}`)
+  }
 }
 
 console.log(`\n[selftest-check-links] 結果: pass=${pass} fail=${fail}`)
