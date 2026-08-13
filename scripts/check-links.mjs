@@ -323,6 +323,7 @@ if (a11yOffenders.length > 0) {
     console.log(`[check-links] ✗ 致命: 索引制御の無いリダイレクトスタブ ${stubs.length}件（トップと同一メタの空ページが重複コンテンツとして索引されうる）。`)
     process.exit(1)
   }
+
 }
 
 
@@ -730,7 +731,7 @@ const robotsFatal = servedRobots.verdict === 'blocks-all' || servedRobots.verdic
 //     緑にしたら死活監視の意味が消えるし、設定は自分で直せる
 // 「403 を許す」形にはしない(本物の権限エラー・公開停止を見逃す)。チャレンジであることを
 // 名乗るヘッダがある応答だけを、この経路へ落とす(判定は isBotChallenge)。
-const { hardBad, softBad, challengedExternal, externalBlind } = partitionLinkResults(results, { externalCount: externalTargets.length })
+const { hardBad, softBad, challengedExternal, challengedSoft, unclassified, externalBlind, softBlind } = partitionLinkResults(results, { externalCount: externalTargets.length, softCount: softTargets.length })
 
 // 失敗の見出しは「ステータス、無ければ例外名(原因コード)」。素の TypeError だけでは
 // 相手が落ちているのか DNS なのか自分の回線なのかが分からない(Day116)。
@@ -747,18 +748,52 @@ if (externalBlind) {
   console.log(`  ✗ 全件判定不能  [外部] 外部リンク ${externalTargets.length}件すべてが bot 対策で測れない（監視が外部について何も言えていない）`)
 }
 
+// egtype 配信(soft)が bot 対策で判定不能な分(Day119)。Day116 は3つの箱を
+// 「外部×判定不能 / 自前(非soft) / soft×判定可」で書いたため **soft × 判定不能** がどこにも
+// 入らず、✗ にも ⚠ にも出ないまま softBad にも数えられず `✓ 全N件 OK` と名乗っていた
+// （失敗が存在するのに全件 OK＝Day101/116 で二度塞いだ集計の嘘の3度目）。
+// 扱いは外部と同じ「このリポでは直せない＝警告」だが、**数には必ず現れる**ようにする。
+for (const r of challengedSoft) console.log(`  ⚠ bot対策  [${r.cat}] ${r.url} は ${r.status} + チャレンジ応答＝到達性が判定不能(egtype 配信側の設定なので portal では直せない)`)
+if (challengedSoft.length > 0) {
+  console.log(`[check-links] ⚠ egtype配信 ${challengedSoft.length}/${softTargets.length} 件が bot 対策で判定不能 — soft と同じく致命にはしないが「未到達」とも「OK」とも数えない。`)
+}
+// floor: soft の全件が判定不能なら egtype 配信について何も言えていない（外部の floor と同じ思想）
+if (softBlind) {
+  console.log(`  ✗ 全件判定不能  [egtype配信] soft ${softTargets.length}件すべてが bot 対策で測れない（監視が egtype 配信について何も言えていない）`)
+}
+// floor(網羅): どの箱にも入らなかった失敗が居たら、それは**分類規則の穴**そのもの。
+// 黙って捨てると今回と同じ「失敗があるのに全件 OK」に戻るので、必ず赤で出す。
+for (const r of unclassified) console.log(`  ✗ 分類不能  [${r.cat}] ${r.url}（owner=${r.owner} soft=${r.soft} challenged=${Boolean(r.challenged)} — 振り分け規則がこの組合せを持っていない）`)
+if (unclassified.length > 0) {
+  console.log(`[check-links] ✗ 致命: 失敗 ${unclassified.length}件がどの箱にも入らなかった（partitionLinkResults の分類が網羅していない）。`)
+}
+
 if (softBad.length > 0) {
   console.log(`[check-links] ⚠ egtype依存(soft) ${softBad.length}/${softTargets.length} 件が未到達 — egtype 本番デプロイ待ちなら想定内(portal と egtype はセットでデプロイ)。デプロイ後は --strict で厳格確認。`)
 }
 
-const fatal = hardBad.length > 0 || localMissing.length > 0 || ogBadType.length > 0 || robotsFatal || servedSitemapFatal || externalBlind || (STRICT && softBad.length > 0)
+const fatal = hardBad.length > 0 || localMissing.length > 0 || ogBadType.length > 0 || robotsFatal || servedSitemapFatal || externalBlind || softBlind || unclassified.length > 0 || (STRICT && (softBad.length > 0 || challengedSoft.length > 0))
 const robotsLabel = `robots ${servedRobots.verdict === 'ok' ? `申告${servedRobots.servedSitemaps.length}件が本番にも実在` : servedRobots.verdict}`
 const ogOkLabel = `OG配信 ${ogResults.filter((r) => r.verdict === 'ok').length}/${ogRoutes.length}件が image/*`
 const sitemapLabel = `配信sitemap ${servedSitemapChecks.filter((c) => c.verdict === 'ok').length}/${servedSitemapChecks.length}件が本番でもリポと一致`
 // 判定不能を「OK」に数えない(Day116)。チャレンジで測れなかった分がある回に「全件 OK」と
 // 名乗ると、監視が見ていないものまで見たことになる＝Day101 の集計の嘘の作り直しになる。
 const challengeLabel = challengedExternal.length > 0 ? ` / 外部 ${challengedExternal.length}件は bot対策で判定不能` : ''
-if (!fatal && hardBad.length === 0 && softBad.length === 0 && challengedExternal.length === 0) {
+const softChallengeLabel = challengedSoft.length > 0 ? ` / egtype配信 ${challengedSoft.length}件は bot対策で判定不能` : ''
+
+// サマリの数字は **分岐条件とは別の観測軸**から出す(Day119・egtype Day118 の横断観点)。
+// 従来 `portal自前 N/N 件 OK` は分子も分母も `portalTargets.length` で、「何件 OK だったか」を
+// 一度も数えず**分岐条件を言い換えていただけ**だった。今日の欠陥（soft×判定不能が
+// どの箱にも入らず、失敗があるのに緑）では、まさにこの形が嘘を隠した——箱が空なら
+// N/N と名乗るので、**箱から漏れた失敗は数字に一切現れない**。
+// `r.ok` は振り分けとは独立した観測なので、分類規則に穴があいた回に分子だけが減る。
+// （`ローカル静的 N件実在` / `自己URL宣言 N件整合` は分岐条件そのもの＝独立でないため、
+//   測ったふりの `N-0/N` に書き換えず素のまま残す。独立していない数字は floor にならない
+//   ＝factory Day117 PM の教訓。）
+const okOf = (owner) => results.filter((r) => r.owner === owner && r.ok).length
+const failedCount = results.filter((r) => !r.ok).length
+
+if (!fatal && failedCount === 0) {
   console.log(`[check-links] ✓ 全${results.length}件 OK / ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合 / ${ogOkLabel} / ${robotsLabel} / ${sitemapLabel}`)
   process.exit(0)
 } else if (!fatal) {
@@ -766,9 +801,9 @@ if (!fatal && hardBad.length === 0 && softBad.length === 0 && challengedExternal
   // 従来は分母に egtype 配信の33件(キャラ画像32 + /egtype/)が混ざっており、hard で通った
   // 件数をそのまま「自前」と称していた＝集計の嘘だった。PM で外部リンクも分けた(hard では
   // あるが portal 自前ではない。混ぜると同じ嘘の作り直しになる)。
-  console.log(`[check-links] ✓ portal自前 ${portalTargets.length}/${portalTargets.length} 件 + 外部 ${externalTargets.length - challengedExternal.length}/${externalTargets.length}件 OK（egtype配信 soft ${softTargets.length}件中 ${softBad.length}件未到達＝警告のみ）${challengeLabel} / ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合 / ${ogOkLabel} / ${robotsLabel} / ${sitemapLabel}`)
+  console.log(`[check-links] ✓ portal自前 ${okOf('portal')}/${portalTargets.length} 件 + 外部 ${okOf('external')}/${externalTargets.length}件 OK（egtype配信 soft ${softTargets.length}件中 ${softBad.length}件未到達＝警告のみ）${challengeLabel}${softChallengeLabel} / ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合 / ${ogOkLabel} / ${robotsLabel} / ${sitemapLabel}`)
   process.exit(0)
 } else {
-  console.log(`[check-links] ✗ 致命 ${hardBad.length}件${externalBlind ? ' + 外部が全件判定不能' : ''}${localMissing.length ? ` + ローカル静的欠落 ${localMissing.length}件` : ''}${ogBadType.length ? ` + OG配信の型なし ${ogBadType.length}件` : ''}${robotsFatal ? ` + robots(${servedRobots.verdict})` : ''}${servedSitemapFatal ? ` + 配信sitemap ${servedSitemapBad.length}件` : ''}${STRICT ? ` + soft ${softBad.length}件` : ''} / 全${results.length}件`)
+  console.log(`[check-links] ✗ 致命 ${hardBad.length}件${externalBlind ? ' + 外部が全件判定不能' : ''}${softBlind ? ' + egtype配信が全件判定不能' : ''}${unclassified.length ? ` + 分類不能 ${unclassified.length}件` : ''}${localMissing.length ? ` + ローカル静的欠落 ${localMissing.length}件` : ''}${ogBadType.length ? ` + OG配信の型なし ${ogBadType.length}件` : ''}${robotsFatal ? ` + robots(${servedRobots.verdict})` : ''}${servedSitemapFatal ? ` + 配信sitemap ${servedSitemapBad.length}件` : ''}${STRICT ? ` + soft ${softBad.length}件` : ''}${STRICT && challengedSoft.length ? ` + egtype配信の判定不能 ${challengedSoft.length}件` : ''} / 全${results.length}件`)
   process.exit(1)
 }

@@ -1478,10 +1478,13 @@ self.addEventListener('fetch', (event) => {
     ok('振り分け: チャレンジでない外部の失敗は従来どおり致命(403 を丸ごと許す形にしない)')
   } else bad(`素の外部失敗の扱いが想定外: ${JSON.stringify(c.hardBad.length)}`)
 
-  const d = partitionLinkResults([R({ owner: 'egtype', soft: true, challenged: true })], { externalCount: 1 })
-  if (d.softBad.length === 0 && d.hardBad.length === 0) {
-    ok('振り分け: soft のチャレンジは未到達にも数えない(デプロイ待ちの件数を判定不能で水増ししない)')
-  } else bad(`soft チャレンジの扱いが想定外: ${JSON.stringify({ soft: d.softBad.length, hard: d.hardBad.length })}`)
+  // Day119 の修正点。**元のテストはここで「softBad にも hardBad にも入らない」ことだけを
+  // 確かめており、どこにも入らないことを許していた**（無いことだけを確かめるテストは、
+  // 存在しないことを検知できない）。専用の箱に入ることまで要求する。
+  const d = partitionLinkResults([R({ owner: 'egtype', soft: true, challenged: true })], { externalCount: 1, softCount: 1 })
+  if (d.softBad.length === 0 && d.hardBad.length === 0 && d.challengedSoft.length === 1 && d.unclassified.length === 0) {
+    ok('振り分け: soft のチャレンジは未到達にも致命にもせず、専用の「判定不能」として必ず数える')
+  } else bad(`soft チャレンジの扱いが想定外: ${JSON.stringify({ soft: d.softBad.length, hard: d.hardBad.length, chalSoft: d.challengedSoft.length, un: d.unclassified.length })}`)
 
   // floor: 外部が全件判定不能なら、外部リンクについて監視は何も言えていない。
   const e = partitionLinkResults(
@@ -1492,6 +1495,149 @@ self.addEventListener('fetch', (event) => {
   if (!partitionLinkResults([], { externalCount: 0 }).externalBlind) {
     ok('振り分け: 外部リンクが0件のときは floor を立てない(母集団ゼロを異常と混同しない)')
   } else bad('外部0件で floor が誤爆')
+
+  // --- Day119: 分類の網羅そのものを固定する ---
+  // 今日の欠陥は「規則が間違っていた」のではなく **組合せが1つ抜けていた** ことだった。
+  // 個々の規則をいくら足しても、抜けは「どの箱にも入らない＝どこにも出ない」形で現れるので、
+  // 規則の外側に「失敗の総数と箱の合計が一致する」検算を置く。
+  const OWNERS = ['portal', 'external', 'egtype']
+  const uncovered = []
+  for (const owner of OWNERS) {
+    for (const challenged of [false, true]) {
+      const soft = owner === 'egtype'   // owner と soft の対応は classifyTargetUrl の契約
+      const r = R({ owner, soft, challenged, status: 403 })
+      const p = partitionLinkResults([r], { externalCount: owner === 'external' ? 1 : 0, softCount: soft ? 1 : 0 })
+      const boxed = p.hardBad.length + p.softBad.length + p.challengedExternal.length + p.challengedSoft.length
+      if (boxed !== 1 || p.unclassified.length !== 0) uncovered.push(`${owner}/challenged=${challenged}(箱=${boxed} 未分類=${p.unclassified.length})`)
+    }
+  }
+  if (uncovered.length === 0) {
+    ok('振り分け: owner×判定不能の全6組合せがちょうど1つの箱に入る(分類の網羅＝集計の嘘を作らない)')
+  } else bad(`どの箱にも入らない/二重に入る組合せがある: ${uncovered.join(' ')}`)
+
+  // 未知の組合せ（将来 owner を増やした等）は unclassified として顕在化すること。
+  // floor: この検算自体が空洞化すると、抜けはまた無言で緑になる。
+  const g = partitionLinkResults([R({ owner: 'partner', soft: true, challenged: true })], { externalCount: 0, softCount: 0 })
+  if (g.unclassified.length === 0 && g.challengedSoft.length === 1) {
+    ok('振り分け: soft である限り owner が未知でも判定不能として拾う(取りこぼさない)')
+  } else bad(`未知 owner の soft チャレンジを取りこぼす: ${JSON.stringify({ un: g.unclassified.length, cs: g.challengedSoft.length })}`)
+
+  // floor: soft が全件判定不能なら egtype 配信について監視は何も言えていない
+  const h = partitionLinkResults(
+    [R({ owner: 'egtype', soft: true, challenged: true }), R({ owner: 'egtype', soft: true, challenged: true })],
+    { externalCount: 0, softCount: 2 })
+  if (h.softBlind) ok('振り分け: soft が全件判定不能なら floor が立つ(外部の floor と同じ思想)')
+  else bad('soft 全件判定不能の floor が立たない')
+
+  if (!partitionLinkResults([], { externalCount: 0, softCount: 0 }).softBlind) {
+    ok('振り分け: soft が0件のときは floor を立てない(母集団ゼロを異常と混同しない)')
+  } else bad('soft 0件で floor が誤爆')
+
+  // 成功は箱に入らない(失敗だけを分類する)。ok を混ぜると件数がすべてずれる。
+  const i = partitionLinkResults([okR, okR], { externalCount: 2, softCount: 0 })
+  if (i.hardBad.length + i.softBad.length + i.challengedExternal.length + i.challengedSoft.length + i.unclassified.length === 0) {
+    ok('振り分け: 成功した結果はどの箱にも入らない(失敗だけを数える)')
+  } else bad('成功が箱に混ざっている')
+}
+
+// 58 配線(Day119): **soft × bot対策の判定不能**が本体で数に現れるか。
+//   純関数(57)が正しく challengedSoft に入れても、本体が受け取らず / 表示せず / fatal にも
+//   floor にも足さなければ、出力は元のまま「✓ 全N件 OK」に戻る。Day113/116 と同じ
+//   ローカルサーバ＋`--base` のハーネスで、egtype 配信の1本だけをチャレンジ応答にして
+//   本体の反応を固定する（他の段は正常にしておく＝exit の理由が読めなくなるため）。
+{
+  const fx = fs.mkdtempSync(path.join(os.tmpdir(), 'links-d119-'))
+  const O = 'https://egshugy.com'  // 正本 app/layout.tsx の metadataBase
+  const sitemapXml = (locs) =>
+    `<?xml version="1.0" encoding="UTF-8"?>\n<urlset>${locs.map((u) => `<url><loc>${u}</loc></url>`).join('')}</urlset>`
+  const robotsTxt = `User-agent: *\nAllow: /\nSitemap: ${O}/sitemap.xml\n`
+  const robotsPath = path.join(fx, 'robots.txt')
+  fs.writeFileSync(robotsPath, robotsTxt)
+  const publicDir = path.join(fx, 'public')
+  fs.mkdirSync(publicDir, { recursive: true })
+  fs.writeFileSync(path.join(publicDir, 'sitemap.xml'), sitemapXml([`${O}/`, `${O}/stamps/`]))
+
+  // 既定は全部正常。検査したい1本だけを差し替える。
+  let serve = {}
+  const server = http.createServer((req, res) => {
+    const url = req.url.split('?')[0]
+    const custom = serve[url]
+    if (custom) {
+      res.writeHead(custom.status ?? 200, { 'content-type': custom.type ?? 'text/plain; charset=utf-8', ...(custom.headers ?? {}) })
+      res.end(custom.body ?? '')
+      return
+    }
+    if (url === '/robots.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end(robotsTxt); return }
+    if (url === '/sitemap.xml') { res.writeHead(200, { 'content-type': 'application/xml' }); res.end(sitemapXml([`${O}/`, `${O}/stamps/`])); return }
+    if (url === '/egtype/sitemap.xml') { res.writeHead(200, { 'content-type': 'application/xml' }); res.end(sitemapXml([`${O}/egtype/`])); return }
+    if (/opengraph-image|twitter-image|\.png$|\.webp$/.test(url)) { res.writeHead(200, { 'content-type': 'image/png' }); res.end('x'); return }
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end('<!doctype html><html><body>ok</body></html>')
+  })
+  await new Promise((r) => server.listen(0, '127.0.0.1', r))
+  const BASE = `http://127.0.0.1:${server.address().port}`
+  const run = (args = []) => new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--base', BASE, ...args],
+      { env: { ...process.env, LINKS_ROBOTS: robotsPath, LINKS_PUBLIC_DIR: publicDir } })
+    let stdout = ''
+    child.stdout.on('data', (d) => { stdout += d })
+    child.stderr.on('data', (d) => { stdout += d })
+    child.on('close', (status) => resolve({ status, stdout }))
+  })
+
+  // Vercel の Attack Challenge と同じ形（403 + x-vercel-mitigated: challenge）
+  const CHALLENGE = { status: 403, headers: { 'x-vercel-mitigated': 'challenge' }, body: 'challenge' }
+  const SOFT_PATH = '/egtype/characters/GMCK.webp'   // classifyTargetUrl で owner=egtype/soft=true
+
+  // (a) 偽陽性の対照。正常な配信で **egtype 配信について** 判定不能を名乗らないこと。
+  //     判定基準を「stdout に 判定不能 の文字があるか」に置くと、check-links が実際に叩く
+  //     外部ドメイン(nomishugy 等)が bot 対策を返した回に本題と無関係で落ちる——実測で一度
+  //     踏んだ（Day113(d)/Day116 が「status ではなく名指しで見る」と書き残したのと同じ罠）。
+  //     この段が名指ししたかどうかだけを見る。
+  const softBlamed = (out) => /egtype配信 \d+\/\d+ 件が bot 対策で判定不能/.test(out)
+    || new RegExp(`⚠ bot対策\\s+\\[[^\\]]+\\] ${BASE}/egtype/`).test(out)
+  serve = {}
+  const rOk = await run()
+  if (!softBlamed(rOk.stdout)) ok('配線: 正常な配信では egtype 配信を「判定不能」と名乗らない(偽陽性なし)')
+  else bad(`正常配信で判定不能が誤検知: ${rOk.stdout.split('\n').filter((l) => /判定不能/.test(l)).join(' / ')}`)
+
+  // (b) 本題。soft の1本がチャレンジ応答のとき——
+  //     修正前は ✗ にも ⚠ にも出ず softBad にも入らず「✓ 全N件 OK」で exit 0 だった。
+  serve = { [SOFT_PATH]: CHALLENGE }
+  const rSoft = await run()
+  const named = new RegExp(`⚠ bot対策\\s+\\[[^\\]]+\\] ${BASE}${SOFT_PATH}`).test(rSoft.stdout)
+  const counted = /egtype配信 1\/\d+ 件が bot 対策で判定不能/.test(rSoft.stdout)
+  const claimsAllOk = /✓ 全\d+件 OK/.test(rSoft.stdout)
+  if (named && counted && !claimsAllOk) {
+    ok('配線: soft のチャレンジは URL を名指しし件数にも現れる(「全件 OK」と名乗らない)')
+  } else bad(`soft チャレンジが本体に届いていない: 名指し=${named} 件数=${counted} 全件OK=${claimsAllOk}`)
+
+  // (c) それでも致命にはしない（相手側の設定で portal では直せない＝毎日 red にしない）。
+  //     判定は status ではなく **この段が致命の理由として名指しされたか**。check-links は実在の
+  //     外部ドメインも叩くので、そこが落ちた回に status=1 になり本題と無関係にこのケースだけ
+  //     赤くなる（実測で踏んだ。Day113(d) と同じ作法へ揃える）。
+  const softFatal = (out) => /致命.*egtype配信/.test(out)
+    || new RegExp(`✗ [^\\n]*\\s${BASE}${SOFT_PATH}`).test(out)
+  if (!softFatal(rSoft.stdout)) ok('配線: soft のチャレンジは致命の理由にならない(相手側の設定で false-red を作らない)')
+  else bad(`soft チャレンジが致命化している: ${rSoft.stdout.split('\n').filter((l) => /致命|✗/.test(l)).join(' / ')}`)
+
+  // (d) --strict は「デプロイ後の厳格確認」用なので、そこで測れないのは致命に格上げする。
+  //     ここも「exit 1 になったか」ではなく **strict の致命理由に名指しされたか** で見る。
+  const rStrict = await run(['--strict'])
+  if (rStrict.status === 1 && /\+ egtype配信の判定不能 1件/.test(rStrict.stdout)) {
+    ok('配線: --strict では soft のチャレンジを致命に格上げし理由として名指しする')
+  } else bad(`--strict で soft チャレンジが理由に出ない: status=${rStrict.status} / ${rStrict.stdout.split('\n').filter((l) => /致命/.test(l)).join(' / ')}`)
+
+  // (e) 対照: strict でも、チャレンジが無ければ「egtype配信の判定不能」を理由に挙げないこと
+  //     （常に名指しする実装なら (d) は無条件で通ってしまう＝独立した対照を置く）。
+  serve = {}
+  const rStrictClean = await run(['--strict'])
+  if (!/egtype配信の判定不能/.test(rStrictClean.stdout)) {
+    ok('配線: チャレンジが無い回は strict でも egtype配信の判定不能を理由に挙げない(偽陽性なし)')
+  } else bad('チャレンジ無しでも判定不能を名指ししている')
+
+  server.closeAllConnections?.()
+  server.close()
+  fs.rmSync(fx, { recursive: true, force: true })
 }
 
 console.log(`\n[selftest-check-links] 結果: pass=${pass} fail=${fail}`)

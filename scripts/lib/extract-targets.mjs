@@ -699,22 +699,38 @@ export function isBotChallenge({ status, challengeHeaders = {} } = {}) {
 }
 
 /**
- * 死活結果の振り分け(Day116)。「失敗」を1つの箱に入れず、**誰が直せるか**で分ける。
+ * 死活結果の振り分け(Day116 / Day119 で網羅化)。「失敗」を1つの箱に入れず、**誰が直せるか**で分ける。
  *   hardBad          … portal 自身が直せる失敗（判定不能な自前も含む＝死活が測れないのは異常）
  *   softBad          … egtype 配信待ち（既存の逃がし弁）
  *   challengedExternal … 外部が bot 対策で判定不能（相手側の設定＝portal では直せない・警告）
- *   externalBlind    … 外部が**全件**判定不能（逃がし弁が広がって検知が空洞化した状態＝致命）
+ *   challengedSoft   … egtype 配信が bot 対策で判定不能（このリポでは直せない・警告）
+ *   externalBlind / softBlind … その領域が**全件**判定不能（逃がし弁が広がって検知が空洞化＝致命）
  * 分類を本体のフィルタ式に散らすと、条件が1つずれただけで「全部警告」に倒れても
  * 出力は緑のまま変わらない。ここに集約して規則そのものをテストできる形にする。
+ *
+ * Day119 の欠陥: Day116 は3つの箱を「外部×判定不能」「自前(非soft)」「soft×判定可」で書いたため、
+ * **soft × 判定不能** の組合せがどの箱にも入らなかった。egtype 配信の1本が bot 対策で測れないと
+ * それは ✗ にも ⚠ にも出ず、softBad にも数えられず、結果 `✓ 全N件 OK` と名乗って exit 0 する
+ * ——**失敗が存在するのに全件 OK と言う**（実測で再現）。分類は網羅していなければ集計の嘘になる。
+ * そこで `unclassified` を返し、**どの箱にも入らない失敗が出たら本体が致命化**する（次に規則を
+ * 増やすときも、漏れは緑ではなく赤で出る）。
  */
-export function partitionLinkResults(results, { externalCount = 0 } = {}) {
-  const challengedExternal = results.filter((r) => !r.ok && r.challenged && r.owner === 'external')
-  const hardBad = results.filter((r) => !r.ok && !r.soft && !(r.challenged && r.owner === 'external'))
-  const softBad = results.filter((r) => !r.ok && r.soft && !r.challenged)
+export function partitionLinkResults(results, { externalCount = 0, softCount = 0 } = {}) {
+  const failed = results.filter((r) => !r.ok)
+  const challengedExternal = failed.filter((r) => r.challenged && r.owner === 'external')
+  const challengedSoft = failed.filter((r) => r.challenged && r.soft)
+  const hardBad = failed.filter((r) => !r.soft && !(r.challenged && r.owner === 'external'))
+  const softBad = failed.filter((r) => r.soft && !r.challenged)
+  // 網羅の検算。箱の合計と失敗の総数が合わなければ、どこにも入らなかった結果が居る。
+  const boxed = new Set([...hardBad, ...softBad, ...challengedExternal, ...challengedSoft])
+  const unclassified = failed.filter((r) => !boxed.has(r))
   return {
     hardBad,
     softBad,
     challengedExternal,
+    challengedSoft,
+    unclassified,
     externalBlind: externalCount > 0 && challengedExternal.length === externalCount,
+    softBlind: softCount > 0 && challengedSoft.length === softCount,
   }
 }
