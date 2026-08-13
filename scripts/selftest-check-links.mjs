@@ -1306,5 +1306,112 @@ self.addEventListener('fetch', (event) => {
   fs.rmSync(fx, { recursive: true, force: true })
 }
 
+// 55 配線(Day116): **OG 画像の配信検査(Day104)も fetch 段**にあり、Day113 のハーネスは
+//   配信 sitemap/robots にしか当たっていなかった。㊷ の配線テストは `--list` で走るため
+//   「OG 対象が監視対象に出るか」までしか見ておらず、**取得結果を実際に致命化しているか**は
+//   誰も見ていない（classifyOgDelivery を呼び忘れても、返り値を捨てても、fatal に足し忘れても
+//   純関数テストと --list テストは両方とも緑のまま）。Day113 と同じローカルサーバへ `--base` で
+//   向け、OG の段だけを1本ずつ壊して本体の反応を固定する。
+//   ここは「型なし＝致命」「未反映(404)＝非致命」の**切り分け**が命で、どちらかに倒れると
+//   検査が死ぬ: 致命化が抜ければ Day104 の欠陥が無検知で戻り、逆に 404 まで致命化すると
+//   人間ゲートのデプロイ待ちで毎日 red になり検査ごと捨てられる。
+{
+  const fx = fs.mkdtempSync(path.join(os.tmpdir(), 'links-d116-'))
+  const O = 'https://egshugy.com'  // 正本 app/layout.tsx の metadataBase
+  const sitemapXml = (locs) =>
+    `<?xml version="1.0" encoding="UTF-8"?>\n<urlset>${locs.map((u) => `<url><loc>${u}</loc></url>`).join('')}</urlset>`
+  const robotsTxt = `User-agent: *\nAllow: /\nSitemap: ${O}/sitemap.xml\n`
+  const robotsPath = path.join(fx, 'robots.txt')
+  fs.writeFileSync(robotsPath, robotsTxt)
+  const publicDir = path.join(fx, 'public')
+  fs.mkdirSync(publicDir, { recursive: true })
+  fs.writeFileSync(path.join(publicDir, 'sitemap.xml'), sitemapXml([`${O}/`, `${O}/stamps/`]))
+
+  // 既定は「全部正常」。OG も image/png で返し、検査したい1本だけを差し替える
+  // （他の段が同時に落ちると、exit 1 が何の理由で立ったのか読めなくなる）。
+  let serve = {}
+  const server = http.createServer((req, res) => {
+    const url = req.url.split('?')[0]
+    const custom = serve[url]
+    if (custom) {
+      res.writeHead(custom.status ?? 200, custom.type === null ? {} : { 'content-type': custom.type ?? 'text/plain; charset=utf-8' })
+      res.end(custom.body ?? '')
+      return
+    }
+    if (url === '/robots.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end(robotsTxt); return }
+    if (url === '/sitemap.xml') { res.writeHead(200, { 'content-type': 'application/xml' }); res.end(sitemapXml([`${O}/`, `${O}/stamps/`])); return }
+    if (/opengraph-image|twitter-image|\.png$/.test(url)) { res.writeHead(200, { 'content-type': 'image/png' }); res.end('x'); return }
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end('<!doctype html><html><body>ok</body></html>')
+  })
+  await new Promise((r) => server.listen(0, '127.0.0.1', r))
+  const BASE = `http://127.0.0.1:${server.address().port}`
+  // spawnSync だとイベントループが止まり同一プロセスのこのサーバが応答できない(Day113 と同じ)
+  const run = () => new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--base', BASE],
+      { env: { ...process.env, LINKS_ROBOTS: robotsPath, LINKS_PUBLIC_DIR: publicDir } })
+    let stdout = ''
+    child.stdout.on('data', (d) => { stdout += d })
+    child.stderr.on('data', (d) => { stdout += d })
+    child.on('close', (status) => resolve({ status, stdout }))
+  })
+  /** OG の段が「致命の理由」に挙がっているか。status で見ると外部ドメイン(gtag 等)の
+   *  一時失敗で赤くなった回まで OG のせいに見えるため、名指しの有無で判定する(Day113 (d) と同じ作法)。*/
+  const ogBlamed = (out) => /✗ 型なし\s+\[OG配信\]/.test(out) || /致命.*OG配信の型なし/.test(out)
+  const OG_UNDER_TEST = '/opengraph-image.png'
+
+  // (a) 偽陽性の対照。ここが赤いと以下は「常に落ちる実装」でも通ってしまう。
+  serve = {}
+  const rOk = await run()
+  // サマリ行は非致命の経路でしか出ない。外部ドメイン(gtag 等)が一時失敗した回に
+  // 「4/4 と出ること」を要求すると本題と無関係な理由で赤くなるため(Day113 (d) と同じ)、
+  //   ①OG の段が何も言わないこと（指摘も未反映の ⓘ も無い）
+  //   ②サマリ行が出た回は必ず 4/4 であること（出ない回は判定しない）
+  // の2点で見る。
+  const ogSummary = rOk.stdout.match(/OG配信 (\d+)\/(\d+)件が image\/\*/)
+  const ogSilent = !/\[OG配信\]/.test(rOk.stdout) && !/ⓘ OG配信/.test(rOk.stdout)
+  if (ogSilent && (!ogSummary || (ogSummary[1] === '4' && ogSummary[2] === '4'))) {
+    ok('配線: OG が image/* で配信されていれば何も言わず、数えるときは 4/4 と報告する(偽陽性なし)')
+  } else bad(`正常な OG 配信で誤検知/計上漏れ: silent=${ogSilent} summary=${ogSummary?.[0] ?? '(出ず)'}`)
+
+  // (b) 200 だが HTML＝Day104 が直した欠陥そのもの（中身が画像でないのに 200 なので res.ok では見えない）。
+  serve = { [OG_UNDER_TEST]: { type: 'text/html; charset=utf-8', body: '<!doctype html><html></html>' } }
+  const rHtml = await run()
+  if (rHtml.status === 1 && ogBlamed(rHtml.stdout) && rHtml.stdout.includes(`${BASE}${OG_UNDER_TEST}`)) {
+    ok('配線: OG が 200 でも画像でなければ exit 1 で URL を名指しする(型なしの検査が本体に届いている)')
+  } else bad(`OG 型なしガードが本体で効いていない: status=${rHtml.status}`)
+
+  // (c) content-type ヘッダそのものが無い形（実測された本番の壊れ方。ヘッダ欠落は
+  //     「別の型で返る」とは別経路で、null を image/* 判定に通すと素通りしうる）。
+  serve = { [OG_UNDER_TEST]: { type: null, body: 'x' } }
+  const rNoType = await run()
+  if (rNoType.status === 1 && ogBlamed(rNoType.stdout) && /content-type=\(無し\)/.test(rNoType.stdout)) {
+    ok('配線: content-type ヘッダが無い OG も exit 1(実測された本番の壊れ方をそのまま再現)')
+  } else bad(`型ヘッダ欠落が致命化されていない: status=${rNoType.status}`)
+
+  // (d) 404＝本番未反映。人間ゲートのデプロイ待ちで red にしない（致命の理由に挙がらない）。
+  serve = { [OG_UNDER_TEST]: { status: 404, body: 'not found' } }
+  const rPending = await run()
+  const pendingNoted = /ⓘ OG配信 1\/4 件が本番未反映\(404\)/.test(rPending.stdout)
+  // 「ok の実数を偽らない」は**否定形**で見る。`OG配信 n/4件が image/*` のサマリ行は非致命の
+  // 経路でしか出ないため、`3/4 が出ること`を要求すると外部ドメイン(gtag 等)の一時失敗で
+  // 致命側へ落ちた回に、本題と無関係な理由でこのケースだけが赤くなる(実際に一度そうなった)。
+  // 出るか出ないかに関わらず成り立つ「4/4 とは名乗らない」を固定する。
+  const claimsAllOk = /OG配信 4\/4件が image\/\*/.test(rPending.stdout)
+  if (pendingNoted && !ogBlamed(rPending.stdout) && !claimsAllOk) {
+    ok('配線: 未反映(404)は警告に留まり致命の理由にならず、サマリも 4/4 とは名乗らない')
+  } else bad(`未反映の扱いが想定外: pending=${pendingNoted} blamed=${ogBlamed(rPending.stdout)} claims4/4=${claimsAllOk}`)
+
+  // (e) 5xx＝瞬断。恒久欠陥と混ぜない（リトライ後も 5xx なら警告のみ）。
+  serve = { [OG_UNDER_TEST]: { status: 503, body: 'oops' } }
+  const rDown = await run()
+  if (/⚠ 503\s+\[OG配信\]/.test(rDown.stdout) && !ogBlamed(rDown.stdout)) {
+    ok('配線: 5xx の OG は警告のみ(瞬断を恒久欠陥と混ぜない)')
+  } else bad(`5xx の扱いが想定外: ${rDown.stdout.split('\n').filter((l) => /OG配信/.test(l)).join(' / ')}`)
+
+  server.closeAllConnections?.()
+  server.close()
+  fs.rmSync(fx, { recursive: true, force: true })
+}
+
 console.log(`\n[selftest-check-links] 結果: pass=${pass} fail=${fail}`)
 process.exit(fail === 0 ? 0 : 1)
