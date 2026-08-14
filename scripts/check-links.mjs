@@ -664,13 +664,18 @@ const results = await Promise.all(targets.map(async (t) => ({ ...t, ...(await ch
 // 2ホストがたまたま同時に瞬断した回まで「こちらの回線」と名乗ってしまう（一過性は再確認で
 // 消えるので、診断の入力からも消えているべき）。
 const RECHECK_DELAY_MS = Number(process.env.LINKS_RECHECK_DELAY_MS ?? 3000)
-const { recovered, stillDown, diagnosis: connectDiagnosis } = await resolveConnectFailures(results, {
+const { recovered, responded, stillDown, diagnosis: connectDiagnosis } = await resolveConnectFailures(results, {
   recheck: check,
   sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
   delayMs: RECHECK_DELAY_MS,
 })
 if (recovered.length > 0) {
   console.log(`[check-links] ⓘ 接続不能だった ${recovered.length}件は ${RECHECK_DELAY_MS}ms 後の再確認で回復（一過性の瞬断＝リンクは生きている）: ${recovered.map((r) => r.url).join(' ')}`)
+}
+// 再確認で応答が返った分(Day123 PM)。届かなかったのではなく**実際の応答**で判定する
+// （404 が返ったなら、それは接続の話ではなく壊れたリンクとして下の箱で名指しされる）。
+if (responded.length > 0) {
+  console.log(`[check-links] ⓘ 接続不能だった ${responded.length}件は再確認で応答が返った（届かなかった扱いにせず、その応答で判定）: ${responded.map((r) => `${r.url}→${r.status}`).join(' ')}`)
 }
 if (connectDiagnosis === 'local-network') {
   // リンク切れとは名乗らない。監視は「測れなかった」ことを報告する（緑にもしない）。

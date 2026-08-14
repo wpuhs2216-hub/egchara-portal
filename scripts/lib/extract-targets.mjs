@@ -861,25 +861,47 @@ export function classifyRecheck({ ok } = {}) {
  *
  * 回復した結果はその場で成功へ置き換える（呼び出し側は ⓘ で「回復した」と名乗ること。
  * 黙って緑にすると、瞬断が起きていた事実まで消える）。
+ *
+ * 再確認で **応答が返った回は ok でなくてもその応答を採用する**(Day123 PM)。朝の実装は
+ * `ok` の回だけを取り込み、404/500 が返った回は最初の観測(status 0＝届かなかった)のまま
+ * 残していた。これは**強い観測を捨てて弱い観測を名乗る**形で、実害が2つ出る:
+ *   ① 外部リンクは status 0 のとき `isUnmeasurableExternal` で「到達性が判定不能(警告)」へ
+ *      落ちるので、**本当に死んでいる外部リンク(404)が、初回にたまたま瞬断しただけで
+ *      致命から警告へ格下げ**される（Day122 が「死んだ外部リンクの検知力は落とさない」と
+ *      書いた当のものが落ちる）
+ *   ② 404 を返したホストは**届いている**のに `stillDown` に残るため、他の1ホストの不通と
+ *      合わさって `hosts.length >= 2` を満たし、診断が「こちらの回線」へ倒れる。すると
+ *      両方が箱から外れ、**壊れているリンクが一度も名指しされない**
+ * 応答が返った時点でそれは接続段の話ではないので、以降は通常の失敗として扱う。
  */
 export async function resolveConnectFailures(results, { recheck, sleep = async () => {}, delayMs = 0 } = {}) {
   const unreachable = results.filter(isUnreachableResult)
-  if (unreachable.length === 0) return { unreachable, recovered: [], stillDown: [], diagnosis: 'none' }
+  if (unreachable.length === 0) return { unreachable, recovered: [], responded: [], stillDown: [], diagnosis: 'none' }
   await sleep(delayMs)
   const recovered = []
+  const responded = []
   for (const r of unreachable) {
     const again = await recheck(r.url)
-    if (classifyRecheck(again) === 'recovered') {
+    const isRecovered = classifyRecheck(again) === 'recovered'
+    // 応答が返った（status > 0）なら採用する。届かなかったことにしない。
+    if (!isRecovered && !isUnreachableResult(again)) {
+      Object.assign(r, again, { respondedOnRecheck: true })
+      responded.push(r)
+      continue
+    }
+    if (isRecovered) {
       Object.assign(r, again, { recoveredFromUnreachable: true })
       recovered.push(r)
     }
   }
-  const stillDown = unreachable.filter((r) => !r.ok)
+  // 「まだ届かない」＝応答が1つも返っていないものだけ。404 が返ったホストを不通に数えると
+  // 回線の診断が誤って倒れる（上の②）。
+  const stillDown = unreachable.filter((r) => !r.ok && isUnreachableResult(r))
   const diagnosis = diagnoseConnectFailures({
     unreachableHosts: stillDown.map((r) => hostOf(r.url)),
     okCount: results.filter((r) => r.ok).length,
   })
   // 測れなかった印は結果そのものに持たせる（partitionLinkResults がリンクの箱から外す根拠）。
   if (diagnosis === 'local-network') for (const r of stillDown) r.localNetwork = true
-  return { unreachable, recovered, stillDown, diagnosis }
+  return { unreachable, recovered, responded, stillDown, diagnosis }
 }

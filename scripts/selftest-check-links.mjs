@@ -1905,6 +1905,32 @@ self.addEventListener('fetch', (event) => {
       ok('接続段: 全部回復した回は診断そのものが none になり、結果は成功へ置き換わる')
     } else bad(`回復の反映が想定外: ${JSON.stringify({ down: rec.stillDown.length, d: rec.diagnosis })}`)
 
+    // 再確認で**応答が返った**回（Day123 PM）: ok でなくてもその応答を採用する。
+    // 朝の実装は ok の回だけ取り込み、404 の回は status 0(届かなかった)のまま残していた
+    // ＝**強い観測を捨てて弱い観測を名乗る**形。外部リンクは status 0 だと
+    // isUnmeasurableExternal で警告に落ちるので、**死んだ外部リンクが致命から警告へ格下げ**される。
+    const r404 = await resolveConnectFailures(results.map((r) => ({ ...r })), {
+      recheck: async (url) => (url.includes('a.example') ? { ok: false, status: 404, err: null, errCode: null } : { ok: true, status: 200 }),
+    })
+    const adopted = r404.responded[0]
+    if (r404.responded.length === 1 && adopted.status === 404 && adopted.respondedOnRecheck && r404.recovered.length === 1) {
+      ok('接続段: 再確認で応答が返った回はその応答を採用する(404 を「届かなかった」に畳まない)')
+    } else bad(`応答の採用が想定外: ${JSON.stringify({ resp: r404.responded.length, st: adopted?.status, rec: r404.recovered.length })}`)
+    // 採用した結果が**致命の箱に戻る**ことまで見る（格下げが実際に消えていること）
+    const pd404 = partitionLinkResults([adopted], { externalCount: 1, softCount: 0 })
+    if (pd404.hardBad.length === 1 && pd404.unreachableExternal.length === 0) {
+      ok('接続段: 応答を採用した外部の404は到達不能(警告)ではなく従来どおり致命の箱に入る')
+    } else bad(`404 の格下げが残っている: ${JSON.stringify({ hard: pd404.hardBad.length, un: pd404.unreachableExternal.length })}`)
+    // 応答が返ったホストを「不通」に数えると、回線の診断が誤って倒れる（もう一方が本当に不通のとき）
+    if (r404.diagnosis === 'none' && r404.stillDown.length === 0) {
+      ok('接続段: 応答が返ったホストを不通に数えない(こちらの回線と誤診しない)')
+    } else bad(`応答済みホストを不通に数えている: ${JSON.stringify({ d: r404.diagnosis, down: r404.stillDown.length })}`)
+    // 対照: 応答が返らない回は従来どおり「まだ届かない」として扱う（採用の口が広がりすぎていない）
+    const rDown = await resolveConnectFailures(results.map((r) => ({ ...r })), { recheck: async () => ({ ok: false, status: 0, errCode: 'ECONNREFUSED' }) })
+    if (rDown.responded.length === 0 && rDown.stillDown.length === 2) {
+      ok('対照: 応答が返らない回は従来どおり stillDown（採用の口は応答があるときだけ）')
+    } else bad(`応答なしの回まで採用している: ${JSON.stringify({ resp: rDown.responded.length, down: rDown.stillDown.length })}`)
+
     // 接続段の失敗が無ければ recheck を一度も呼ばない（正常な回に余計な叩き直しをしない）
     let called = 0
     const clean = await resolveConnectFailures([{ ok: true, url: 'https://c.example/z', status: 200 }], {
