@@ -90,3 +90,51 @@ export async function simulateSwActivate(swSource, { origin, foreignKeys }) {
     hasFetch,
   }
 }
+
+/**
+ * オフライン時のフォールバックが **どのキャッシュから** 応答を取るかを実走で測る(Day122)。
+ *
+ * Day107/110/112 は delete / unregister の範囲を三度絞ったが、**読み出しの範囲**は
+ * 一度も見ていなかった。無名の `caches.match(request)` は Cache Storage を**オリジン全体**
+ * から探すので、同居する子アプリや、救済対象の端末に残った他所製 SW の孤児キャッシュが
+ * 同じ URL を持っていれば、それが portal の応答として返る。書き方(正規表現)ではなく
+ * 「結果としてどこから返したか」で見るのは activate のシミュレータと同じ理由。
+ *
+ * @returns {Promise<{source: 'origin-wide'|'none'|string}>} source は 'origin-wide'(全体検索)
+ *          / 取り出したキャッシュ名 / 'none'(フォールバックが無い)
+ */
+export async function simulateSwOfflineFallback(swSource, { origin }) {
+  const listeners = new Map()
+  let openedForRead = null
+  const caches = {
+    keys: async () => [],
+    delete: async () => true,
+    // オリジン全体を検索する無名 match。ここから返ったら「他所のキャッシュも候補」の証拠。
+    match: async () => ({ __from: 'origin-wide' }),
+    open: async (name) => ({
+      put: async () => {},
+      match: async () => { openedForRead = name; return { __from: name } },
+    }),
+  }
+  const self = {
+    location: { origin },
+    addEventListener: (type, fn) => listeners.set(type, fn),
+    skipWaiting: () => {},
+    clients: { claim: async () => {} },
+  }
+  // ネットワークは落ちている＝必ず catch 側(フォールバック)へ入る
+  const ctx = { self, caches, URL, Promise, console, fetch: async () => { throw new Error('offline') } }
+  ctx.globalThis = ctx
+  vm.createContext(ctx)
+  vm.runInContext(swSource, ctx)
+
+  if (!listeners.has('fetch')) return { source: 'none' }
+  let responded = null
+  listeners.get('fetch')({
+    request: { url: `${origin}/`, method: 'GET' },
+    respondWith: (p) => { responded = p },
+  })
+  const res = await Promise.resolve(responded).catch(() => null)
+  if (!res) return { source: 'none' }
+  return { source: res.__from ?? (openedForRead ? openedForRead : 'none') }
+}

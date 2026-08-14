@@ -60,6 +60,13 @@ self.addEventListener('fetch', (event) => {
         }
         return response
       })
-      .catch(() => caches.match(event.request))
+      // オフライン時のフォールバックは**自分のキャッシュに限る**(Day122)。
+      // 無名の `caches.match(request)` は Cache Storage を**オリジン全体**から探す。
+      // egshugy.com には子アプリが同居し、さらに救済対象の端末には他所製 SW が残した
+      // 孤児キャッシュが居るので、同じ URL(例: `/`)を持つ**他所のキャッシュを portal の
+      // 応答として返す**経路になっていた。Day107/110/112 は delete と unregister の範囲を
+      // 三度絞ってきたが、**読み出しの範囲は一度も絞っていなかった**（同じ共有資源に対して
+      // 書き込み側だけに規則があり、読み出し側には無い＝片側だけの判定）。
+      .catch(() => caches.open(CACHE_NAME).then((cache) => cache.match(event.request)))
   )
 })

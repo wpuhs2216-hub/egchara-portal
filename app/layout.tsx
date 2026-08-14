@@ -82,12 +82,21 @@ export default function RootLayout({
           汚染の正体は**ルートスコープを握った他所製の SW**。よって:
             ・解除対象はルートスコープ(scope === origin + '/')かつ /sw.js 以外の登録に限る
               → 子アプリ(スコープが /egtype/ 等)は巻き込まない
-            ・Cache Storage の全消しは「汚染を実際に見つけた時だけ」行う(平常時は何も消さない)
           最後に自分の /sw.js を登録する。既に登録済みなら register は冪等。
+
+          Day122: Day107 は Cache Storage の全消しを「汚染を見つけた時だけ」に**回数**を絞ったが、
+          **範囲**はオリジン全体のまま(caches.keys() を絞らず全件 delete)だった。汚染端末＝既に
+          困っている端末で、同居する子アプリ(egtype/kingscup/word-wolf/pekarin)のプリキャッシュまで
+          道連れにする形が最後の1経路として残っていた。しかも Day107/110 の巻き添えガードは
+          アロー記法しか見ておらず、この script は ES5 の function 式なので**母集団に入っていながら
+          永久に白**だった(実測: 同内容のアロー版は検知・function 版は0件)。
+          全消しは削除する。汚染の実体はルートスコープの SW 登録そのもので、それは上で unregister
+          済み。残る孤児キャッシュは、portal 自身の SW がオフライン応答を**自分のキャッシュに限って**
+          探す形にした(public/sw.js)ので、もう誰の応答にもならない。
         */}
         <script
           dangerouslySetInnerHTML={{
-            __html: `if('serviceWorker' in navigator){var R=location.origin+'/';navigator.serviceWorker.getRegistrations().then(function(rs){var bad=rs.filter(function(r){return r.scope===R&&!((r.active||r.waiting||r.installing||{}).scriptURL||'').endsWith('/sw.js')});return Promise.all(bad.map(function(r){return r.unregister()})).then(function(){return bad.length?caches.keys().then(function(ks){return Promise.all(ks.map(function(k){return caches.delete(k)}))}):null})}).then(function(){return navigator.serviceWorker.register('/sw.js')}).catch(function(){})}`,
+            __html: `if('serviceWorker' in navigator){var R=location.origin+'/';navigator.serviceWorker.getRegistrations().then(function(rs){var bad=rs.filter(function(r){return r.scope===R&&!((r.active||r.waiting||r.installing||{}).scriptURL||'').endsWith('/sw.js')});return Promise.all(bad.map(function(r){return r.unregister()}))}).then(function(){return navigator.serviceWorker.register('/sw.js')}).catch(function(){})}`,
           }}
         />
       </body>
