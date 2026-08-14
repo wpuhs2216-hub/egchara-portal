@@ -14,7 +14,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fetchWithRetry } from './fetch-with-retry.mjs'
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, CROSS_REPO_PREFIXES, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, findRoutesNamingLayoutDefault, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes, findRobotsSitemapIssues, classifyServedRobots, classifyServedSitemap, isServedSitemapFatal, partitionLinkResults } from './lib/extract-targets.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, CROSS_REPO_PREFIXES, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, findRoutesNamingLayoutDefault, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes, findRobotsSitemapIssues, classifyServedRobots, classifyServedSitemap, isServedSitemapFatal, partitionLinkResults, isUnreachableResult, hostOf, diagnoseConnectFailures, classifyRecheck, resolveConnectFailures } from './lib/extract-targets.mjs'
 import { simulateSwActivate } from './lib/sw-activate-sim.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -656,6 +656,31 @@ if (process.argv.includes('--list')) {
 }
 const results = await Promise.all(targets.map(async (t) => ({ ...t, ...(await check(t.url)) })))
 
+// --- 接続段の失敗の切り分け（Day122・Day119 起票の false-red） ---
+// HTTP 応答が1つも返らなかった失敗(status 0)は「リンクが壊れている」ではなく「届かなかった」。
+// 届かなかった理由（一過性の瞬断 / 相手が落ちている / こちらの回線）を分けないと、瞬断のたびに
+// 「✗ 致命 [外部] …/gtag/js」と**リンクを誤って名指しして**赤くなる（実測で4回中2回）。
+// 順序が肝: **先に測り直し**、それでも届かなかった分だけを診断する。逆にすると、無関係な
+// 2ホストがたまたま同時に瞬断した回まで「こちらの回線」と名乗ってしまう（一過性は再確認で
+// 消えるので、診断の入力からも消えているべき）。
+const RECHECK_DELAY_MS = Number(process.env.LINKS_RECHECK_DELAY_MS ?? 3000)
+const { recovered, stillDown, diagnosis: connectDiagnosis } = await resolveConnectFailures(results, {
+  recheck: check,
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  delayMs: RECHECK_DELAY_MS,
+})
+if (recovered.length > 0) {
+  console.log(`[check-links] ⓘ 接続不能だった ${recovered.length}件は ${RECHECK_DELAY_MS}ms 後の再確認で回復（一過性の瞬断＝リンクは生きている）: ${recovered.map((r) => r.url).join(' ')}`)
+}
+if (connectDiagnosis === 'local-network') {
+  // リンク切れとは名乗らない。監視は「測れなかった」ことを報告する（緑にもしない）。
+  for (const r of stillDown) {
+    console.log(`  ✗ 回線  [こちらのネットワーク] ${r.url} へ届かない（${r.err}${r.errCode ? `(${r.errCode})` : ''}）`)
+  }
+  const hosts = [...new Set(stillDown.map((r) => hostOf(r.url)).filter(Boolean))]
+  console.log(`[check-links] ✗ 致命: 再確認しても届かない ${stillDown.length}件（不通ホスト ${hosts.length}件: ${hosts.join(' ')}／成功 ${results.filter((r) => r.ok).length}件）はこちらの回線を疑う形＝**リンクの生死については何も言えていない**（リンク切れとして名指ししない）。`)
+}
+
 // --- OG 画像の配信ヘッダ(Day104) ---
 // 「200 が返るか」ではなく「**画像として配信されているか**」を見る。実測で拡張子なしの OG は
 // 200 だが content-type ヘッダが無く、res.ok しか見ない従来の検査では対象に載せても検知できない。
@@ -752,7 +777,7 @@ const robotsFatal = servedRobots.verdict === 'blocks-all' || servedRobots.verdic
 //     緑にしたら死活監視の意味が消えるし、設定は自分で直せる
 // 「403 を許す」形にはしない(本物の権限エラー・公開停止を見逃す)。チャレンジであることを
 // 名乗るヘッダがある応答だけを、この経路へ落とす(判定は isBotChallenge)。
-const { hardBad, softBad, challengedExternal, challengedSoft, unclassified, externalBlind, softBlind } = partitionLinkResults(results, { externalCount: externalTargets.length, softCount: softTargets.length })
+const { hardBad, softBad, challengedExternal, challengedSoft, unreachableExternal, localNetwork, unclassified, externalBlind, softBlind } = partitionLinkResults(results, { externalCount: externalTargets.length, softCount: softTargets.length })
 
 // 失敗の見出しは「ステータス、無ければ例外名(原因コード)」。素の TypeError だけでは
 // 相手が落ちているのか DNS なのか自分の回線なのかが分からない(Day116)。
@@ -763,10 +788,16 @@ for (const r of challengedExternal) console.log(`  ⚠ bot対策  [${r.cat}] ${r
 if (challengedExternal.length > 0) {
   console.log(`[check-links] ⚠ 外部 ${challengedExternal.length}/${externalTargets.length} 件が bot 対策で判定不能 — 相手側の設定なので portal では直せない＝致命にしない(生死の確認は人手で)。`)
 }
-// floor: 外部の全件がチャレンジで判定不能なら、この段は**何も検査していない**のと同じ。
+// 外部へ再確認しても届かなかった分(Day122)。チャレンジと同じ「到達性が判定不能」で、
+// portal では直せない(相手の一時障害かこちらの egress)。致命にはしないが必ず数に出す。
+for (const r of unreachableExternal) console.log(`  ⚠ 到達不能  [${r.cat}] ${r.url} は再確認しても届かない（${r.err}${r.errCode ? `(${r.errCode})` : ''}）＝リンクが壊れている証拠にはならない(portal では直せない)`)
+if (unreachableExternal.length > 0) {
+  console.log(`[check-links] ⚠ 外部 ${unreachableExternal.length}/${externalTargets.length} 件へ再確認しても届かない — 相手の一時障害かこちらの egress。**名前解決の失敗(ENOTFOUND)は従来どおり致命**なので、死んだドメインの検知力は落ちていない。`)
+}
+// floor: 外部の全件が判定不能(チャレンジ or 到達不能)なら、この段は**何も検査していない**のと同じ。
 // 「判定不能を警告に落とす」逃がし弁が広がりすぎて検知が空洞化した状態を緑にしない。
 if (externalBlind) {
-  console.log(`  ✗ 全件判定不能  [外部] 外部リンク ${externalTargets.length}件すべてが bot 対策で測れない（監視が外部について何も言えていない）`)
+  console.log(`  ✗ 全件判定不能  [外部] 外部リンク ${externalTargets.length}件すべてが測れない（bot対策 ${challengedExternal.length}件 / 到達不能 ${unreachableExternal.length}件＝監視が外部について何も言えていない）`)
 }
 
 // egtype 配信(soft)が bot 対策で判定不能な分(Day119)。Day116 は3つの箱を
@@ -793,13 +824,14 @@ if (softBad.length > 0) {
   console.log(`[check-links] ⚠ egtype依存(soft) ${softBad.length}/${softTargets.length} 件が未到達 — egtype 本番デプロイ待ちなら想定内(portal と egtype はセットでデプロイ)。デプロイ後は --strict で厳格確認。`)
 }
 
-const fatal = hardBad.length > 0 || localMissing.length > 0 || ogBadType.length > 0 || robotsFatal || servedSitemapFatal || externalBlind || softBlind || unclassified.length > 0 || (STRICT && (softBad.length > 0 || challengedSoft.length > 0))
+const fatal = hardBad.length > 0 || localNetwork.length > 0 || localMissing.length > 0 || ogBadType.length > 0 || robotsFatal || servedSitemapFatal || externalBlind || softBlind || unclassified.length > 0 || (STRICT && (softBad.length > 0 || challengedSoft.length > 0))
 const robotsLabel = `robots ${servedRobots.verdict === 'ok' ? `申告${servedRobots.servedSitemaps.length}件が本番にも実在` : servedRobots.verdict}`
 const ogOkLabel = `OG配信 ${ogResults.filter((r) => r.verdict === 'ok').length}/${ogRoutes.length}件が image/*`
 const sitemapLabel = `配信sitemap ${servedSitemapChecks.filter((c) => c.verdict === 'ok').length}/${servedSitemapChecks.length}件が本番でもリポと一致`
 // 判定不能を「OK」に数えない(Day116)。チャレンジで測れなかった分がある回に「全件 OK」と
 // 名乗ると、監視が見ていないものまで見たことになる＝Day101 の集計の嘘の作り直しになる。
 const challengeLabel = challengedExternal.length > 0 ? ` / 外部 ${challengedExternal.length}件は bot対策で判定不能` : ''
+const unreachableLabel = unreachableExternal.length > 0 ? ` / 外部 ${unreachableExternal.length}件は再確認しても到達不能` : ''
 const softChallengeLabel = challengedSoft.length > 0 ? ` / egtype配信 ${challengedSoft.length}件は bot対策で判定不能` : ''
 
 // サマリの数字は **分岐条件とは別の観測軸**から出す(Day119・egtype Day118 の横断観点)。
@@ -822,9 +854,9 @@ if (!fatal && failedCount === 0) {
   // 従来は分母に egtype 配信の33件(キャラ画像32 + /egtype/)が混ざっており、hard で通った
   // 件数をそのまま「自前」と称していた＝集計の嘘だった。PM で外部リンクも分けた(hard では
   // あるが portal 自前ではない。混ぜると同じ嘘の作り直しになる)。
-  console.log(`[check-links] ✓ portal自前 ${okOf('portal')}/${portalTargets.length} 件 + 外部 ${okOf('external')}/${externalTargets.length}件 OK（egtype配信 soft ${softTargets.length}件中 ${softBad.length}件未到達＝警告のみ）${challengeLabel}${softChallengeLabel} / ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合 / ${ogOkLabel} / ${robotsLabel} / ${sitemapLabel}`)
+  console.log(`[check-links] ✓ portal自前 ${okOf('portal')}/${portalTargets.length} 件 + 外部 ${okOf('external')}/${externalTargets.length}件 OK（egtype配信 soft ${softTargets.length}件中 ${softBad.length}件未到達＝警告のみ）${challengeLabel}${unreachableLabel}${softChallengeLabel} / ローカル静的アセット ${localImageRefs.length}件実在 / 自己URL宣言 ${selfUrlDeclarations}件整合 / ${ogOkLabel} / ${robotsLabel} / ${sitemapLabel}`)
   process.exit(0)
 } else {
-  console.log(`[check-links] ✗ 致命 ${hardBad.length}件${externalBlind ? ' + 外部が全件判定不能' : ''}${softBlind ? ' + egtype配信が全件判定不能' : ''}${unclassified.length ? ` + 分類不能 ${unclassified.length}件` : ''}${localMissing.length ? ` + ローカル静的欠落 ${localMissing.length}件` : ''}${ogBadType.length ? ` + OG配信の型なし ${ogBadType.length}件` : ''}${robotsFatal ? ` + robots(${servedRobots.verdict})` : ''}${servedSitemapFatal ? ` + 配信sitemap ${servedSitemapBad.length}件` : ''}${STRICT ? ` + soft ${softBad.length}件` : ''}${STRICT && challengedSoft.length ? ` + egtype配信の判定不能 ${challengedSoft.length}件` : ''} / 全${results.length}件`)
+  console.log(`[check-links] ✗ 致命 ${hardBad.length}件${localNetwork.length ? ` + こちらの回線で測れず ${localNetwork.length}件` : ''}${externalBlind ? ' + 外部が全件判定不能' : ''}${softBlind ? ' + egtype配信が全件判定不能' : ''}${unclassified.length ? ` + 分類不能 ${unclassified.length}件` : ''}${localMissing.length ? ` + ローカル静的欠落 ${localMissing.length}件` : ''}${ogBadType.length ? ` + OG配信の型なし ${ogBadType.length}件` : ''}${robotsFatal ? ` + robots(${servedRobots.verdict})` : ''}${servedSitemapFatal ? ` + 配信sitemap ${servedSitemapBad.length}件` : ''}${STRICT ? ` + soft ${softBad.length}件` : ''}${STRICT && challengedSoft.length ? ` + egtype配信の判定不能 ${challengedSoft.length}件` : ''} / 全${results.length}件`)
   process.exit(1)
 }

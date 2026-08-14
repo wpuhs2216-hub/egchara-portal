@@ -26,13 +26,13 @@ import { fetchWithRetry, isTransientStatus } from './fetch-with-retry.mjs'
 // ための逃がし弁で、従来はカテゴリごとの手書きリテラルだったため実際の配信主体とずれていた
 // (同じ /egtype/ 依存で画像は hard・型ページは soft)。URL 由来の述語に変えた分、今度は
 // 「接頭辞を広げれば自前のリンク切れまで警告のみにできる」経路が生まれるので、そこも押さえる。
-import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, findRoutesNamingLayoutDefault, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes, findRobotsSitemapIssues, classifyServedRobots, parseRobotsGroups, classifyServedSitemap, isServedSitemapFatal, isBotChallenge, partitionLinkResults } from './lib/extract-targets.mjs'
+import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, findRoutesNamingLayoutDefault, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes, findRobotsSitemapIssues, classifyServedRobots, parseRobotsGroups, classifyServedSitemap, isServedSitemapFatal, isBotChallenge, partitionLinkResults, isUnreachableResult, hostOf, diagnoseConnectFailures, classifyRecheck, resolveConnectFailures, isUnmeasurableExternal } from './lib/extract-targets.mjs'
 //
 // 追加(Day110): SW の後片付けを「書き方」ではなく「**実際に何を消したか**」で固定する。
 // Day107 の静的規則は `caches.keys()` の結果を絞らず delete する形を黒としたが、実害として
 // 残っていたのは `keys.filter((k) => k !== CACHE_NAME)` ＝ filter はあるのに他人のものを
 // 全部消す反転形で、規則の上では白だった。SW は素の JS なので実走できる。
-import { simulateSwActivate, ownPrefixOf } from './lib/sw-activate-sim.mjs'
+import { simulateSwActivate, simulateSwOfflineFallback, ownPrefixOf } from './lib/sw-activate-sim.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -775,6 +775,32 @@ function walkRel(dir, prefix = '') {
   if (findOriginWideSwWipes([{ file: 'page.tsx', src: 'export default function P() {}' }]).scanned === 0) {
     ok('SW: 走査した母集団(scanned)を数えている(0件を致命化する floor の根拠)')
   } else bad('SW の scanned が想定外')
+
+  // Day122: **記法の穴**。走査対象の app/layout.tsx はインライン script 文字列で ES5 の
+  // `function(ks){...}` で書かれているのに、規則はアロー限定だった。同内容の全消しを
+  // function 式で書くと offenders=0 になり、**守っている当のファイルの記法をガードが
+  // 見ていない**状態が続いていた（scanned は 1 なので母集団 floor も満たしてしまう）。
+  const wipeAllEs5 = "navigator.serviceWorker.getRegistrations().then(function(rs){return Promise.all(rs.map(function(r){return r.unregister()}))}).then(function(){return caches.keys().then(function(ks){return Promise.all(ks.map(function(k){return caches.delete(k)}))})})"
+  const w5 = findOriginWideSwWipes([{ file: 'layout.tsx', src: wipeAllEs5 }])
+  if (w5.offenders.length === 2 && w5.scanned === 1) {
+    ok('SW: function 式で書かれた全消しもアロー版と同じく2件とも指摘する(記法で検知が消えない)')
+  } else bad(`function 式の全消しを見落とす: ${JSON.stringify(w5)}`)
+
+  // 対照: function 式でも、絞ってあれば誤検知しない（記法対応が false-red を作らないこと）。
+  const scopedEs5 = "caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k.indexOf('portal-')===0}).map(function(k){return caches.delete(k)}))})"
+  if (findOriginWideSwWipes([{ file: 'layout.tsx', src: scopedEs5 }]).offenders.length === 0) {
+    ok('SW: function 式でも filter で絞ってあれば指摘しない(記法対応で誤検知を増やさない)')
+  } else bad('function 式の絞り込み形を誤検知している')
+
+  // 正本 app/layout.tsx を実走査して違反0件（退行の基準線）。
+  // 「今たまたま違反が無い」と「見ている」は別なので、上の検知テストと必ず対で置く。
+  {
+    const layoutSrc = fs.readFileSync(path.join(__dirname, '..', 'app', 'layout.tsx'), 'utf8')
+    const r = findOriginWideSwWipes([{ file: 'app/layout.tsx', src: layoutSrc }])
+    if (r.scanned === 1 && r.offenders.length === 0) {
+      ok('SW: 正本 app/layout.tsx のブートストラップはオリジン全体を巻き込まない(退行の基準線)')
+    } else bad(`正本 layout.tsx が巻き添え形: ${JSON.stringify(r)}`)
+  }
 }
 
 // ㊺ 配線(Day107): 純関数が正しくても本体が致命化していなければ何も守れない。
@@ -885,6 +911,43 @@ self.addEventListener('fetch', (event) => {
   if (f.hasActivate === false && f.hasFetch === false && f.cacheName === null) {
     ok('SW実走: activate/fetch の有無を数えている(0件を致命化する floor の根拠)')
   } else bad(`floor の根拠が取れていない: ${JSON.stringify(f)}`)
+}
+
+// ㊾ SW のオフライン応答が**どのキャッシュから**返るか(Day122・実走)。
+//   Day107/110/112 は delete と unregister の範囲を三度絞ったが、**読み出しの範囲**は
+//   一度も見ていなかった。無名の `caches.match(request)` は Cache Storage を**オリジン全体**
+//   から探すので、同居する子アプリや、救済対象の端末に残った他所製 SW の孤児キャッシュが
+//   同じ URL(例 `/`)を持っていれば、それが portal の応答として返る。
+//   静的検査では「match しているか」しか見えないので、activate と同じく実走で出所を測る。
+{
+  const O = 'https://egshugy.com'
+  const swPath = path.join(__dirname, '..', 'public', 'sw.js')
+  const src = fs.readFileSync(swPath, 'utf8')
+
+  // (a) 正本。オフライン時のフォールバックは自分のキャッシュからしか取らない。
+  const own = await simulateSwOfflineFallback(src, { origin: O })
+  if (own.source === 'portal-v1') {
+    ok('SW実走: オフライン応答は自分のキャッシュ(portal-v1)からだけ取る(他所の応答を返さない)')
+  } else bad(`フォールバックの出所が想定外: ${JSON.stringify(own)}`)
+
+  // (b) 負の対照。無名 match に戻すと**オリジン全体**から取る形になることを実測で示す
+  //     （「自分のキャッシュから取れている」が偶然でないことの裏取り＝空洞化の下限）。
+  const wide = await simulateSwOfflineFallback(src.replace('caches.open(CACHE_NAME).then((cache) => cache.match(event.request))', 'caches.match(event.request)'), { origin: O })
+  if (wide.source === 'origin-wide') {
+    ok('SW実走: 無名 caches.match はオリジン全体から取る形として区別できる(修正前の経路を再現)')
+  } else bad(`修正前の形を区別できない: ${JSON.stringify(wide)}`)
+
+  // (c) フォールバックそのものが消えた退化を「自分のキャッシュから取れている」と混同しない。
+  //     (正本を機械的に削るとソースが壊れて別の失敗になるので、最小の SW を書いて測る)
+  const noFallbackSw = `const CACHE_NAME='portal-v1'
+self.addEventListener('fetch', (event) => {
+  if (event.request.method !== 'GET') return
+  event.respondWith(fetch(event.request))
+})`
+  const none = await simulateSwOfflineFallback(noFallbackSw, { origin: O })
+  if (none.source === 'none') {
+    ok('SW実走: フォールバックが無い形は none として区別できる(オフライン能力の退化を見逃さない)')
+  } else bad(`フォールバック消失を区別できない: ${JSON.stringify(none)}`)
 }
 
 // ㊼ SW 実走ガードの配線(Day110)。純関数が正しくても本体が致命化していなければ何も守れない。
@@ -1720,6 +1783,261 @@ self.addEventListener('fetch', (event) => {
       ok(`既定メタ: 正本 app/ の実ルート ${real.length}件はいずれも既定メタを名乗っていない(退行の基準線)`)
     } else bad(`正本 app/ に違反あり or 母集団が空: 母集団=${real.length} 違反=${JSON.stringify(off.map((o) => o.route))}`)
   }
+}
+
+// 60 接続段の失敗の切り分け（Day122・純関数）。
+//   Day119 起票の false-red: 毎日の cron が回によって赤くなる（実測で変更前の HEAD でも
+//   4回中2回が gtag への ECONNREFUSED で exit 1）。直し方は「外部の接続失敗を許す」ではなく
+//   **状態を増やす**——届かなかった理由（一過性 / 相手が落ちている / こちらの回線）を分ける。
+{
+  if (isUnreachableResult({ status: 0, ok: false }) && !isUnreachableResult({ status: 403, ok: false })) {
+    ok('接続段: HTTP 応答が返らなかった失敗(status 0)だけを「届かなかった」として扱う(403 等は混ぜない)')
+  } else bad('unreachable の判定が status 0 以外まで拾っている/拾えていない')
+
+  if (hostOf('https://www.googletagmanager.com/gtag/js?id=G-X') === 'www.googletagmanager.com' && hostOf('not a url') === null) {
+    ok('接続段: ホストは URL から取り、壊れた URL は null(ホスト数の勘定に混ぜない)')
+  } else bad(`hostOf が想定外: ${hostOf('https://www.googletagmanager.com/gtag/js?id=G-X')} / ${hostOf('not a url')}`)
+
+  // 本題(a): 他が通っているのに単独ホストだけ不通 → 相手の障害か一過性。再確認へ回す。
+  if (diagnoseConnectFailures({ unreachableHosts: ['www.googletagmanager.com'], okCount: 89 }) === 'peer') {
+    ok('接続段: 単独ホストだけ不通で他は通っている回は peer(再確認で一過性かを分ける)')
+  } else bad('単独ホスト不通を peer と診断しない')
+
+  // 本題(b): 1件も通っていない → こちらの回線。リンク切れと名乗ってはいけない。
+  if (diagnoseConnectFailures({ unreachableHosts: ['a.example', 'a.example'], okCount: 0 }) === 'local-network') {
+    ok('接続段: 1件も成功していない回はこちらの回線を疑う(観測できていないことを観測したと言わない)')
+  } else bad('成功0件でも相手のせいにしている')
+
+  // 本題(c): 無関係な複数ホストが同時に不通 → 単独ホストの障害では説明できない。
+  if (diagnoseConnectFailures({ unreachableHosts: ['a.example', 'b.example'], okCount: 5 }) === 'local-network') {
+    ok('接続段: 無関係な複数ホストが同時に不通ならこちらの回線を疑う(Day119 の指示どおりの切り分け)')
+  } else bad('複数ホスト同時不通をこちらの回線と診断しない')
+
+  // 同一ホストが何件不通でも「複数ホスト」ではない(1つの相手が落ちているだけ)。
+  if (diagnoseConnectFailures({ unreachableHosts: ['a.example', 'a.example', 'a.example'], okCount: 5 }) === 'peer') {
+    ok('接続段: 同じホストが何件不通でも「複数ホスト」と数えない(1つの相手の障害と区別する)')
+  } else bad('同一ホストの複数件をこちらの回線と誤診している')
+
+  // 偽陽性の対照: 接続段の失敗が無い回は、このフェーズごと走らせない。
+  if (diagnoseConnectFailures({ unreachableHosts: [], okCount: 90 }) === 'none') {
+    ok('接続段: 接続段の失敗が無い回は none(再確認フェーズも診断も走らせない)')
+  } else bad('失敗0件でも診断を名乗っている')
+
+  if (classifyRecheck({ ok: true }) === 'recovered' && classifyRecheck({ ok: false }) === 'peer-down') {
+    ok('接続段: 再確認で通れば一過性、依然不通なら相手が落ちている(名前で分ける)')
+  } else bad('再確認の名前が想定外')
+
+  // 振り分け: こちらの回線で測れなかった分は、リンクを名指しする箱に**入れない**。
+  // ただし「どこにも入らない」ことも許さない（Day119 の教訓＝否定形には肯定形の相方）。
+  const ln = partitionLinkResults(
+    [{ ok: false, url: 'u', cat: 'c', owner: 'portal', status: 0, localNetwork: true }],
+    { externalCount: 0, softCount: 0 })
+  if (ln.hardBad.length === 0 && ln.localNetwork.length === 1 && ln.unclassified.length === 0) {
+    ok('振り分け: こちらの回線で測れなかった失敗は hardBad に混ぜず、専用の箱で必ず数える')
+  } else bad(`回線の箱が想定外: ${JSON.stringify({ hard: ln.hardBad.length, ln: ln.localNetwork.length, un: ln.unclassified.length })}`)
+
+  // 外部へ再確認しても届かない失敗の扱い(Day122・実測で残った false-red)。
+  //   Day119 の指示どおり「複数ホスト同時不通＝こちらの回線」を実装したうえで本番実走を
+  //   繰り返すと、**単独ホスト(gtag)の接続拒否が再確認をも跨ぐ回**が残った(4回に1回ほど exit 1)。
+  //   この失敗は「リンクが壊れている」証拠にならない(相手の一時障害 or こちらの egress・
+  //   どちらも portal では直せない)ので、403 のチャレンジと同じ「到達性が判定不能」に置く。
+  //   ただし丸ごと許すのではなく、**名前解決の失敗(ENOTFOUND)＝ドメインが消えた**は致命のまま。
+  {
+    const U = (o) => ({ ok: false, status: 0, url: 'https://x.example/y', cat: 'c', ...o })
+    if (isUnmeasurableExternal(U({ owner: 'external', errCode: 'ECONNREFUSED' }))) {
+      ok('到達不能: 外部への接続拒否は「判定不能」(リンクが壊れている証拠にはならない)')
+    } else bad('外部の接続拒否を判定不能として扱えていない')
+
+    if (!isUnmeasurableExternal(U({ owner: 'external', errCode: 'ENOTFOUND' }))) {
+      ok('到達不能: 名前解決の失敗(ENOTFOUND)は恒久失敗なので判定不能に逃がさない(死んだドメインは検知する)')
+    } else bad('ENOTFOUND まで判定不能に逃がしている')
+
+    if (!isUnmeasurableExternal(U({ owner: 'portal', errCode: 'ECONNREFUSED' }))) {
+      ok('到達不能: 自前(portal)へ届かないのは致命のまま(自分のサイトの死活は逃がさない)')
+    } else bad('自前の接続失敗まで逃がしている')
+
+    if (!isUnmeasurableExternal(U({ owner: 'external', status: 404, ok: false }))) {
+      ok('到達不能: 応答が返った失敗(404 等)は対象外(接続段だけを分ける)')
+    } else bad('応答のある失敗まで接続段として扱っている')
+
+    const p1 = partitionLinkResults([U({ owner: 'external', errCode: 'ECONNREFUSED' })], { externalCount: 2 })
+    if (p1.hardBad.length === 0 && p1.unreachableExternal.length === 1 && p1.unclassified.length === 0 && !p1.externalBlind) {
+      ok('振り分け: 外部の到達不能は致命にせず専用の箱で必ず数える(OK にも未分類にもしない)')
+    } else bad(`到達不能の振り分けが想定外: ${JSON.stringify({ h: p1.hardBad.length, u: p1.unreachableExternal.length, un: p1.unclassified.length })}`)
+
+    const p2 = partitionLinkResults([U({ owner: 'external', errCode: 'ENOTFOUND' })], { externalCount: 1 })
+    if (p2.hardBad.length === 1 && p2.unreachableExternal.length === 0) {
+      ok('振り分け: ENOTFOUND は従来どおり致命(外部の接続失敗を丸ごと許す形にしていない)')
+    } else bad(`ENOTFOUND の扱いが想定外: ${JSON.stringify({ h: p2.hardBad.length, u: p2.unreachableExternal.length })}`)
+
+    // floor: 判定不能の理由が混ざっても「外部について一件も測れていない」なら空洞化。
+    const p3 = partitionLinkResults(
+      [U({ owner: 'external', errCode: 'ECONNREFUSED' }), U({ owner: 'external', challenged: true, status: 403 })],
+      { externalCount: 2 })
+    if (p3.externalBlind) {
+      ok('振り分け: 外部が「チャレンジ＋到達不能」で全件測れないなら floor が立つ(理由が混ざっても空洞は空洞)')
+    } else bad('理由が混ざると外部の floor が立たない')
+  }
+
+  // 順序（本 Day の核心）: **測り直してから診断する**。一過性で回復した分を診断の入力に
+  //   残すと、無関係な2ホストが**たまたま同時に瞬断した**だけの回まで「こちらの回線」と
+  //   名乗る（＝新しい false-red を自分で作る）。recheck を注入して決定的に固定する。
+  {
+    const R = (url) => ({ ok: false, status: 0, err: 'TypeError', errCode: 'ECONNREFUSED', url, owner: 'external', cat: 'c' })
+    const results = [R('https://a.example/x'), R('https://b.example/y'), { ok: true, url: 'https://c.example/z', status: 200 }]
+    // a だけが回復 → 残る不通は b の1ホストだけ＝相手の障害（回線のせいにしない）
+    const one = await resolveConnectFailures(results.map((r) => ({ ...r })), {
+      recheck: async (url) => ({ ok: url.includes('a.example'), status: url.includes('a.example') ? 200 : 0 }),
+    })
+    if (one.recovered.length === 1 && one.stillDown.length === 1 && one.diagnosis === 'peer') {
+      ok('接続段: 回復した分を診断の入力から外す(同時に瞬断しただけの回を「こちらの回線」と言わない)')
+    } else bad(`順序が想定外: ${JSON.stringify({ rec: one.recovered.length, down: one.stillDown.length, d: one.diagnosis })}`)
+
+    // どちらも回復しない → 無関係な2ホストが不通のまま＝こちらの回線。印まで付くこと。
+    const both = await resolveConnectFailures(results.map((r) => ({ ...r })), { recheck: async () => ({ ok: false, status: 0 }) })
+    if (both.recovered.length === 0 && both.diagnosis === 'local-network' && both.stillDown.every((r) => r.localNetwork)) {
+      ok('接続段: 再確認しても複数ホストが不通なら回線と診断し、結果に印を付ける(箱から外す根拠)')
+    } else bad(`回線の診断が想定外: ${JSON.stringify({ d: both.diagnosis, marked: both.stillDown.map((r) => Boolean(r.localNetwork)) })}`)
+
+    // 回復したら成功として扱う（黙って落とさない・二重に数えない）
+    const rec = await resolveConnectFailures(results.map((r) => ({ ...r })), { recheck: async () => ({ ok: true, status: 200 }) })
+    if (rec.stillDown.length === 0 && rec.diagnosis === 'none' && rec.recovered.every((r) => r.ok && r.recoveredFromUnreachable)) {
+      ok('接続段: 全部回復した回は診断そのものが none になり、結果は成功へ置き換わる')
+    } else bad(`回復の反映が想定外: ${JSON.stringify({ down: rec.stillDown.length, d: rec.diagnosis })}`)
+
+    // 接続段の失敗が無ければ recheck を一度も呼ばない（正常な回に余計な叩き直しをしない）
+    let called = 0
+    const clean = await resolveConnectFailures([{ ok: true, url: 'https://c.example/z', status: 200 }], {
+      recheck: async () => { called++; return { ok: true } },
+    })
+    if (called === 0 && clean.diagnosis === 'none') {
+      ok('接続段: 失敗が無い回は再確認を一度も叩かない(平常時のコストを増やさない)')
+    } else bad(`平常時に再確認している: called=${called}`)
+  }
+
+  // 対照: localNetwork の印が無い接続失敗は従来どおり致命（「status 0 を丸ごと許す」形にしない）。
+  const pd = partitionLinkResults(
+    [{ ok: false, url: 'u', cat: 'c', owner: 'portal', status: 0 }], { externalCount: 0, softCount: 0 })
+  if (pd.hardBad.length === 1 && pd.localNetwork.length === 0) {
+    ok('振り分け: 印の無い接続失敗は従来どおり致命(接続段の失敗を丸ごと許す形にしない)')
+  } else bad(`印無しの接続失敗の扱いが想定外: ${JSON.stringify({ hard: pd.hardBad.length, ln: pd.localNetwork.length })}`)
+}
+
+// 61 配線(Day122): 接続段の失敗に本体がどう反応するか。
+//   純関数(60)が正しく診断しても、本体が再確認を走らせず / 回復を反映せず / 回線の箱を
+//   致命に足さなければ、出力は元のまま「✗ 致命 [外部] …」に戻る。Day113/116/119 と同じ
+//   ローカルサーバ＋`--base` のハーネスで、**接続を切る**応答（socket destroy）を使って固定する。
+{
+  const fx = fs.mkdtempSync(path.join(os.tmpdir(), 'links-d122-'))
+  const O = 'https://egshugy.com'
+  const sitemapXml = (locs) =>
+    `<?xml version="1.0" encoding="UTF-8"?>\n<urlset>${locs.map((u) => `<url><loc>${u}</loc></url>`).join('')}</urlset>`
+  const robotsTxt = `User-agent: *\nAllow: /\nSitemap: ${O}/sitemap.xml\n`
+  const robotsPath = path.join(fx, 'robots.txt')
+  fs.writeFileSync(robotsPath, robotsTxt)
+  const publicDir = path.join(fx, 'public')
+  fs.mkdirSync(publicDir, { recursive: true })
+  fs.writeFileSync(path.join(publicDir, 'sitemap.xml'), sitemapXml([`${O}/`, `${O}/stamps/`]))
+
+  // 接続を切る（fetch は例外＝status 0 になる）。
+  //   dropAlways … ずっと切る（恒常的に届かない相手）
+  //   dropWindow … **最初の1回が来てから WINDOW_MS の間だけ**切る（瞬断そのもの）
+  // 「最初の N 回だけ切る」という回数の数え方は使わない: socket を落とすと同じ接続に
+  // 相乗りしていた別リクエストも巻き添えで落ちるため、サーバ側の回数とクライアント側が
+  // 見る失敗回数が一致せず、テストが回によって緑にも赤にもなった（実測）。
+  // 時間窓なら本走(fetchWithRetry の3試行＝計1.2秒)は必ず窓の内側、再確認(下の
+  // LINKS_RECHECK_DELAY_MS)は必ず窓の外側に来るので、どちらの側からも決定的になる。
+  // 窓は本走(3試行)を確実に覆う長さにする。90件同時のうえ実在の外部も叩くので、
+  // retry の backoff(400/800ms)に**待ち行列の遅れ**が乗り、3試行目が 1.5 秒を越える回があった
+  // (実測でこのケースだけが回によって緑になった＝テスト側の false-green)。余裕を広く取る。
+  const WINDOW_MS = 6000
+  let dropAlways = new Set()
+  let dropWindow = null   // { path, since }
+  const server = http.createServer((req, res) => {
+    const url = req.url.split('?')[0]
+    let inWindow = false
+    if (dropWindow && dropWindow.path === url) {
+      if (dropWindow.since === null) dropWindow.since = Date.now()
+      inWindow = Date.now() - dropWindow.since < WINDOW_MS
+    }
+    if (dropAlways.has(url) || inWindow) {
+      req.socket.destroy()
+      return
+    }
+    if (url === '/robots.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end(robotsTxt); return }
+    if (url === '/sitemap.xml') { res.writeHead(200, { 'content-type': 'application/xml' }); res.end(sitemapXml([`${O}/`, `${O}/stamps/`])); return }
+    if (url === '/egtype/sitemap.xml') { res.writeHead(200, { 'content-type': 'application/xml' }); res.end(sitemapXml([`${O}/egtype/`])); return }
+    if (/opengraph-image|twitter-image|\.png$|\.webp$/.test(url)) { res.writeHead(200, { 'content-type': 'image/png' }); res.end('x'); return }
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end('<!doctype html><html><body>ok</body></html>')
+  })
+  await new Promise((r) => server.listen(0, '127.0.0.1', r))
+  const BASE = `http://127.0.0.1:${server.address().port}`
+  const run = () => new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--base', BASE],
+      { env: { ...process.env, LINKS_ROBOTS: robotsPath, LINKS_PUBLIC_DIR: publicDir, LINKS_RECHECK_DELAY_MS: '8000' } })
+    let stdout = ''
+    child.stdout.on('data', (d) => { stdout += d })
+    child.stderr.on('data', (d) => { stdout += d })
+    child.on('close', (status) => resolve({ status, stdout }))
+  })
+
+  const TARGET = '/stamps/'   // portal 自前の実ルート（owner=portal・hard）
+
+  // (a) 偽陽性の対照。接続段の失敗が無い回は、再確認も回線の診断も名乗らない。
+  //     判定は「stdout に語があるか」ではなく **この段が名指ししたか**（Day113(d)/Day116/119 の作法。
+  //     check-links は実在の外部ドメインも叩くので、そこが落ちた回に本題と無関係で赤くなる）。
+  const blamedLocalNet = (out) => /こちらの回線を疑う形/.test(out) || /✗ 回線 {2}\[こちらのネットワーク\]/.test(out)
+  //     回復の名指しも **このフィクスチャの URL について** 言われたかだけを見る。実行環境の回線が
+  //     細って実在の外部(gtag 等)が一過性で落ちた回に、本題と無関係で赤くなるのを避けるため
+  //     （実測で一度踏んだ。Day113(d)/Day116/119 が三度書き残したのと同じ罠を、また踏んだ）。
+  const blamedRecovery = (out) => new RegExp(`再確認で回復[^\\n]*${BASE}`).test(out)
+  dropAlways = new Set(); dropWindow = null
+  const rClean = await run()
+  if (!blamedLocalNet(rClean.stdout) && !blamedRecovery(rClean.stdout)) {
+    ok('配線: 接続段の失敗が無い回は再確認も回線の診断も名乗らない(偽陽性なし)')
+  } else bad(`正常な回で接続段の診断が誤爆: ${rClean.stdout.split('\n').filter((l) => /回線|再確認/.test(l)).join(' / ')}`)
+
+  // (b) 本題。**1回目だけ**接続を切られた1本（＝瞬断そのもの）。
+  //     修正前は fetchWithRetry の3試行(計1.2秒)を使い切って hardBad＝「✗ 致命」で exit 1 だった。
+  //     ここでは再確認で回復し、緑のまま、しかも**黙って緑にせず**回復を名乗ること。
+  //     このケースだけは**実行環境の回線が生きていること**を前提にする（回線が細っていれば
+  //     診断は「こちらの回線」になり、それはその環境における正しい答え＝本題を測れない）。
+  //     測れない回は黙って緑にせず、環境が復するまで数回だけやり直し、駄目なら赤で報告する。
+  let rFlaky = null
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    dropAlways = new Set(); dropWindow = { path: TARGET, since: null }
+    const r = await run()
+    if (!blamedLocalNet(r.stdout)) { rFlaky = r; break }
+    console.log(`    (実行環境の回線が不通と診断されたため測り直す ${attempt}/3)`)
+  }
+  if (rFlaky === null) {
+    bad('瞬断のケースを測れなかった（実行環境の回線が3回とも不通と診断された＝環境側の問題）')
+  } else {
+    const namedRecovered = new RegExp(`接続不能だった 1件は \\d+ms 後の再確認で回復[^\\n]*${BASE}${TARGET}`).test(rFlaky.stdout)
+    const blamedTarget = new RegExp(`✗ [^\\n]*\\s${BASE}${TARGET}`).test(rFlaky.stdout)
+    if (namedRecovered && !blamedTarget) {
+      ok('配線: 一過性の瞬断は再確認で回復し、リンクを致命として名指ししない(かつ回復したことを名乗る)')
+    } else bad(`瞬断の扱いが想定外: 回復の名指し=${namedRecovered} 致命の名指し=${blamedTarget}`)
+  }
+
+  // (c) 対照: **ずっと**接続できない1本は緑にならず、その URL が名指しされる。
+  //     (b) と入力の形は同じで「続くかどうか」だけが違う＝再確認が一過性だけを吸収し、
+  //     恒常的な不通は素通ししないことの対。「接続失敗を丸ごと許す」形にしていない floor。
+  //     ここで peer/回線 のどちらと名乗るかまでは要求しない——check-links は実在の外部ドメインも
+  //     叩くので、実行環境の回線が細った回には「こちらの回線」が**正しい診断**になる
+  //     （環境に依存する断定を配線テストに書くと Day113(d)/Day116 と同じ false-red を作る）。
+  //     peer と回線の切り分けそのものは 60 の純関数テストで決定的に固定している。
+  dropWindow = null; dropAlways = new Set([TARGET])
+  const rDown = await run()
+  const named = new RegExp(`✗ [^\\n]*\\s${BASE}${TARGET}`).test(rDown.stdout)
+  const claimsAllOk = /✓ 全\d+件 OK/.test(rDown.stdout)
+  if (named && !claimsAllOk) {
+    ok('配線: ずっと接続できない相手は再確認でも回復せず、URL を名指しして緑にしない')
+  } else bad(`恒常的な不通の扱いが想定外: 名指し=${named} 全件OK=${claimsAllOk}`)
+
+  server.closeAllConnections?.()
+  server.close()
+  fs.rmSync(fx, { recursive: true, force: true })
 }
 
 console.log(`\n[selftest-check-links] 結果: pass=${pass} fail=${fail}`)

@@ -661,9 +661,13 @@ export function isServedSitemapFatal(verdict) {
 const SW_ENUM_RE = /getRegistrations\s*\(\s*\)/
 const SW_CACHE_KEYS_RE = /caches\s*\.\s*keys\s*\(\s*\)/
 // 列挙結果 rs を .filter を通さずそのまま .map(r => r.unregister()) へ渡している形。
-const SW_UNFILTERED_UNREGISTER_RE = /getRegistrations\s*\(\s*\)[\s\S]{0,200}?\.then\s*\(\s*(?:\(\s*)?([A-Za-z_$][\w$]*)\s*\)?\s*=>[\s\S]{0,200}?\1\s*\.\s*map\s*\(/
+// 記法(Day122): 走査対象の app/layout.tsx は **インライン script 文字列**で、ES5 の
+// `function(ks){...}` で書かれている。アロー限定の規則にしていたため、**まったく同じ全消しが
+// function 式で書かれていると offenders=0** になっていた（実測: 同内容のアロー版は2件検知、
+// function 版は0件。守っている当のファイルの記法をガードが見ていない）。両方を受ける。
+const SW_UNFILTERED_UNREGISTER_RE = /getRegistrations\s*\(\s*\)[\s\S]{0,200}?\.then\s*\(\s*(?:function\s*)?\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*(?:=>|\{)[\s\S]{0,200}?\1\s*\.\s*map\s*\(/
 // キー列挙 ks を .filter を通さずそのまま .map(k => caches.delete(k)) へ渡している形。
-const SW_UNFILTERED_CACHE_DELETE_RE = /caches\s*\.\s*keys\s*\(\s*\)[\s\S]{0,200}?\.then\s*\(\s*(?:\(\s*)?([A-Za-z_$][\w$]*)\s*\)?\s*=>[\s\S]{0,200}?\1\s*\.\s*map\s*\(/
+const SW_UNFILTERED_CACHE_DELETE_RE = /caches\s*\.\s*keys\s*\(\s*\)[\s\S]{0,200}?\.then\s*\(\s*(?:function\s*)?\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*(?:=>|\{)[\s\S]{0,200}?\1\s*\.\s*map\s*\(/
 // 反転形(Day110): filter はあるが条件が `k !== CACHE_NAME` だけ＝「自分の現行**以外は全部**消す」。
 // caches.keys() はオリジン全体を返すので、これは絞り込みではなく他アプリの全消しそのもの。
 // 上の2規則は「filter があれば白」と読むため、この形は素通りしていた。
@@ -746,22 +750,136 @@ export function isBotChallenge({ status, challengeHeaders = {} } = {}) {
  * そこで `unclassified` を返し、**どの箱にも入らない失敗が出たら本体が致命化**する（次に規則を
  * 増やすときも、漏れは緑ではなく赤で出る）。
  */
+// 外部ホストへ「再確認しても届かなかった」失敗の扱い(Day122)。
+//
+// Day119 の指示どおり「複数ホストが同時に不通ならこちらの回線」を実装したうえで**実測**すると、
+// 単独ホスト(gtag)の接続拒否が再確認(3秒後)をも跨ぐ回が残った——4回に1回ほど exit 1。
+// この失敗が何を意味するかを詰め直すと、**「リンクが壊れている」証拠にはなっていない**:
+// 相手の一時障害かこちらの egress かのどちらかで、portal はどちらも直せない。403 のチャレンジ
+// (Day116)と同じ「到達性が判定不能」であり、緑に数えてはいけないが致命にする根拠も無い。
+//
+// ただし「外部の接続失敗を丸ごと許す」形にはしない(Day119 が明示的に禁じた形)。
+// **名前解決そのものが失敗した(ENOTFOUND)＝そのドメインが消えている**は恒久失敗なので、
+// 従来どおり致命のまま残す。恒久と一時を errCode で分けることで、死んだ外部リンクの検知力は
+// 落とさずに false-red だけを消す（Day85 が 4xx と一時失敗を分けたのと同じ線引き）。
+const PERMANENT_CONNECT_CODES = new Set(['ENOTFOUND'])
+
+/** 外部ホストへ届かず、しかも恒久失敗と断定できない＝到達性が判定不能。 */
+export function isUnmeasurableExternal(r) {
+  return r?.owner === 'external' && r?.status === 0 && !PERMANENT_CONNECT_CODES.has(r?.errCode)
+}
+
 export function partitionLinkResults(results, { externalCount = 0, softCount = 0 } = {}) {
   const failed = results.filter((r) => !r.ok)
-  const challengedExternal = failed.filter((r) => r.challenged && r.owner === 'external')
-  const challengedSoft = failed.filter((r) => r.challenged && r.soft)
-  const hardBad = failed.filter((r) => !r.soft && !(r.challenged && r.owner === 'external'))
-  const softBad = failed.filter((r) => r.soft && !r.challenged)
+  // こちらの回線で測れなかった分(Day122)は、まずここで抜く。以降の箱は
+  // 「相手/自分のどちらのリンクが壊れているか」を語る箱なので、**測れていない結果**を
+  // 混ぜると ✗ の件数がリンクを誤って名指しする（原因が読めない赤は Day116 の false-red と同じ害）。
+  const localNetwork = failed.filter((r) => r.localNetwork)
+  const measured = failed.filter((r) => !r.localNetwork)
+  const challengedExternal = measured.filter((r) => r.challenged && r.owner === 'external')
+  const challengedSoft = measured.filter((r) => r.challenged && r.soft)
+  // 外部×再確認しても不通(恒久失敗でない)＝到達性が判定不能。チャレンジと同じ扱いで、
+  // 致命にはしないが**必ず数に出す**（OK には数えない）。
+  const unreachableExternal = measured.filter((r) => !r.challenged && isUnmeasurableExternal(r))
+  const hardBad = measured.filter((r) => !r.soft && !(r.challenged && r.owner === 'external') && !(!r.challenged && isUnmeasurableExternal(r)))
+  const softBad = measured.filter((r) => r.soft && !r.challenged)
   // 網羅の検算。箱の合計と失敗の総数が合わなければ、どこにも入らなかった結果が居る。
-  const boxed = new Set([...hardBad, ...softBad, ...challengedExternal, ...challengedSoft])
+  const boxed = new Set([...hardBad, ...softBad, ...challengedExternal, ...challengedSoft, ...unreachableExternal, ...localNetwork])
   const unclassified = failed.filter((r) => !boxed.has(r))
   return {
     hardBad,
     softBad,
     challengedExternal,
     challengedSoft,
+    unreachableExternal,
+    localNetwork,
     unclassified,
-    externalBlind: externalCount > 0 && challengedExternal.length === externalCount,
+    // floor: 外部について**一件も測れていない**なら、この段は何も検査していないのと同じ。
+    // 判定不能の理由(チャレンジ / 届かない)が混ざっても「測れていない」ことに変わりはない。
+    externalBlind: externalCount > 0 && challengedExternal.length + unreachableExternal.length === externalCount,
     softBlind: softCount > 0 && challengedSoft.length === softCount,
   }
+}
+
+// --- 接続段の失敗を「相手が落ちている」と即断しない（Day122） ---
+//
+// Day119 起票の実害: 毎日の cron が回によって赤くなる。実測で**変更前の HEAD でも4回中2回**が
+// `TypeError(ECONNREFUSED) [外部] googletagmanager.com/gtag/js` で exit 1 だった。
+// `fetchWithRetry` は3試行するが backoff 400/800ms ＝計 1.2 秒で、この環境の瞬断を跨げない。
+// 半々で赤くなる監視は Day116 の論旨そのもの（false-red は本物のリンク切れを埋もれさせる）。
+//
+// 直し方を「外部の接続失敗を許す」にはしない——それは本物の死んだリンクまで緑にする。
+// 増やすのは**状態**（Day116 の再適用）: HTTP 応答が1つも返らなかった失敗(status 0)は
+// 「リンクが壊れている」ではなく「**届かなかった**」であり、届かなかった理由は3つに分かれる。
+//   ① 一過性の瞬断      … 間隔を空けて確かめ直せば通る（監視としては成功）
+//   ② 相手が落ちている  … 他のホストは通っているのに、そのホストだけ届かない（従来どおりの失敗）
+//   ③ こちらの回線      … そもそも1件も通っていない／無関係な複数ホストが同時に不通
+//                        （リンクの生死については**何も言えていない**。リンク切れと名乗ってはいけない）
+// ①②の切り分けは「もう一度叩く」でしかできない（時間を跨ぐ観測が要る）が、③は**その回の中の
+// 他の結果**だけで判定できる。判定材料が違うので、③を先に決めてから①②の再確認へ進む。
+
+/** HTTP 応答が1つも返らなかった（＝届かなかった）結果か。status 0 は check/fetchWithRetry の表現。 */
+export function isUnreachableResult(r) {
+  return r?.status === 0
+}
+
+/** URL のホスト（比較用）。壊れた URL は null（ホスト数の勘定に混ぜない）。 */
+export function hostOf(url) {
+  try { return new URL(url).host } catch { return null }
+}
+
+/**
+ * 接続段の失敗の原因を、その回の観測だけで切り分ける。
+ *   'none'          … 接続段の失敗が無い（再確認フェーズごと走らせない）
+ *   'local-network' … こちらの回線を疑う。1件も成功していない、または**無関係な複数ホスト**が
+ *                     同時に不通（単独ホストの障害では説明できない形）
+ *   'peer'          … 単独ホストだけが不通で他は通っている。一過性か相手の障害かは再確認で分ける
+ */
+export function diagnoseConnectFailures({ unreachableHosts = [], okCount = 0 } = {}) {
+  const hosts = [...new Set(unreachableHosts.filter(Boolean))]
+  if (hosts.length === 0) return 'none'
+  // 1件も通っていない回に「このリンクが切れている」と名乗るのは、観測できていないことを
+  // 観測したと言うのと同じ（Day101/116/119 で三度塞いだ集計の嘘の、原因側の版）。
+  if (okCount === 0) return 'local-network'
+  // 無関係な2ホスト以上が同時に接続不能。相手側が示し合わせて落ちるより、こちらの回線を疑う。
+  if (hosts.length >= 2) return 'local-network'
+  return 'peer'
+}
+
+/** 再確認の結果の名前。回復＝一過性（緑でよい）／依然不通＝相手が落ちている（従来どおりの失敗）。 */
+export function classifyRecheck({ ok } = {}) {
+  return ok ? 'recovered' : 'peer-down'
+}
+
+/**
+ * 接続段の失敗を「測り直してから診断する」フェーズ。recheck / sleep を注入可能にしてあるのは
+ * fetchWithRetry と同じ理由——実ネットワーク無しで**順序**まで決定的に検証できるようにするため。
+ *
+ * 順序が肝: **先に測り直し、それでも届かなかった分だけを診断する**。逆にすると、無関係な
+ * 2ホストが**たまたま同時に瞬断した**だけの回まで「こちらの回線」と名乗ってしまう
+ * （一過性は再確認で消えるので、診断の入力からも消えているべき）。
+ *
+ * 回復した結果はその場で成功へ置き換える（呼び出し側は ⓘ で「回復した」と名乗ること。
+ * 黙って緑にすると、瞬断が起きていた事実まで消える）。
+ */
+export async function resolveConnectFailures(results, { recheck, sleep = async () => {}, delayMs = 0 } = {}) {
+  const unreachable = results.filter(isUnreachableResult)
+  if (unreachable.length === 0) return { unreachable, recovered: [], stillDown: [], diagnosis: 'none' }
+  await sleep(delayMs)
+  const recovered = []
+  for (const r of unreachable) {
+    const again = await recheck(r.url)
+    if (classifyRecheck(again) === 'recovered') {
+      Object.assign(r, again, { recoveredFromUnreachable: true })
+      recovered.push(r)
+    }
+  }
+  const stillDown = unreachable.filter((r) => !r.ok)
+  const diagnosis = diagnoseConnectFailures({
+    unreachableHosts: stillDown.map((r) => hostOf(r.url)),
+    okCount: results.filter((r) => r.ok).length,
+  })
+  // 測れなかった印は結果そのものに持たせる（partitionLinkResults がリンクの箱から外す根拠）。
+  if (diagnosis === 'local-network') for (const r of stillDown) r.localNetwork = true
+  return { unreachable, recovered, stillDown, diagnosis }
 }
