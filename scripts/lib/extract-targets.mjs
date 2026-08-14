@@ -15,12 +15,23 @@
 
 // URL は空白・引用符・バッククォート・山括弧・閉じ括弧の手前まで貪欲に取る。
 // こうするとクエリ(?a=b&c=d)・フラグメント(#x)・エンコード(%20)が自然に含まれる。
-const URL_RE = /https:\/\/[^\s"'`<>\\)]+/g
+//
+// `http://` も拾う(Day125・Day116 起票の「https:// 限定」の解消)。従来は https だけを見ており、
+// **平文 http のリンクは監視対象に一度も入らなかった**——死活も、リンク切れも、何も言えない。
+// 「外部 8/9件 OK」というサマリは、その 9 の母集団に http のリンクが**構造的に入らない**
+// ことを名乗っていない＝Day101/116/119 で三度塞いだ「見ていないものを見たことにする」形。
+// 実測では現時点の live ソースに http のリンクは0件なので、この変更は**今日の母集団を
+// 変えない**（＝退行の危険なく、次に誰かが書いた日に初めて効く）。
+// なお portal の配信先は `http://192.168.0.77/`(CLAUDE.md) なので、UI にその手の URL が
+// 1行入るだけで無監視のリンクが生まれる状態だった。
+// 除外リスト(EXCLUDE)は従来どおり効くので、`http://www.w3.org/2000/svg`(SVG の xmlns)や
+// schema.org は対象にならない。
+const URL_RE = /https?:\/\/[^\s"'`<>\\)]+/g
 // 文末の句読点は URL の一部でないことが多いので剥がす(「…は https://example.com/。」等)。
 const TRAILING_PUNCT = /[.,;:!?)\]]+$/
 
 /**
- * ソース文字列から外部 URL(https://) を抽出する。
+ * ソース文字列から外部 URL(http:// / https://) を抽出する。
  * テンプレートリテラルの補間 `${...}` を含む断片は「実 URL が組み立て時にしか
  * 定まらない動的 URL」なので、切れた前半を実在 URL と誤認しないよう捨てる。
  */
@@ -29,7 +40,7 @@ export function extractExternalUrls(src, { exclude = null } = {}) {
   for (const m of src.matchAll(URL_RE)) {
     if (m[0].includes('${')) continue // 動的 URL: 切れた前半を叩かない
     const url = m[0].replace(TRAILING_PUNCT, '')
-    if (!url || url === 'https://') continue
+    if (!url || url === 'https://' || url === 'http://') continue
     if (exclude && exclude.test(url)) continue
     out.add(url)
   }

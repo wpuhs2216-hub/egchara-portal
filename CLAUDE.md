@@ -33,6 +33,15 @@
 - `lib/` - ユーティリティ（cn関数等）
 - `scripts/` - デプロイ・キャッシュパージスクリプト
 
+## 検証コマンド（何を実際に検査するか）
+- `npm run check` … 型 + 監視系セルフテスト + egtype 整合を**まとめて**実行（これが日々の検証の入口）
+- `npm run typecheck` … `tsc --noEmit`（実測: app/components など **161 ファイル**を検査する）
+- `node scripts/selftest-check-links.mjs` … 死活監視 check-links の抽出・振り分け・配線（**フィクスチャで完結**。`LINKS_SRC_DIR` を使い実在ドメインは叩かない）
+- `node scripts/check-links.mjs` … 本番への実走（外部ドメインを実際に叩く。cron/GitHub Actions もこれ）
+- **`npm run lint` は無い**（2026-08-15 に削除）。eslint はこのリポの依存に**一度も入っていなかった**ため、
+  `"lint": "eslint ."` は実行すると `eslint: not found` で落ちるだけの空手形だった。
+  lint を入れる場合は eslint / eslint-config-next を devDependencies に追加してから script を戻すこと。
+
 ## コーディング規約
 ### コンポーネント追加時
 - [ ] shadcn/ui コンポーネントは `npx shadcn@latest add <component>` で追加

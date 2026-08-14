@@ -2100,5 +2100,140 @@ export async function generateMetadata() { return { title: 'ゲーム一覧', de
   fs.rmSync(fx, { recursive: true, force: true })
 }
 
+// 62 配線(Day125・Day116 起票の消化): **抽出層まで含めて**フィクスチャで固定する。
+//
+// これまでの配線テストは「何を叩くか」を決める抽出層（featured-apps / EXPERIMENTS /
+// app の JSX / live components）に override の口が無く、**正本の app/ をそのまま読む**しか
+// なかった。その結果、配線テストは実在の外部ドメイン(x.com・tiktok・googletagmanager)を
+// 本当に叩いており、実行環境の回線状態で結果が変わる——実測で **9回に1回**、本題と
+// 無関係な赤が出ていた(Day123 PM)。`LINKS_SRC_DIR` を足し、外へ一歩も出ずに
+// 「抽出 → 振り分け → 判定 → 終了コード」の全段を踏めるようにする。
+//
+// 併せて `http://` の抽出(本 Day)も、ここで**実際に監視対象へ載る**ことを見る
+// （純関数テストは「拾えること」しか見ない。載っても叩かれなければ意味がない）。
+{
+  const fx = fs.mkdtempSync(path.join(os.tmpdir(), 'links-d125-'))
+  fs.mkdirSync(path.join(fx, 'app'), { recursive: true })
+  fs.mkdirSync(path.join(fx, 'public'), { recursive: true })
+  const O = 'https://egshugy.com'
+  fs.writeFileSync(path.join(fx, 'robots.txt'), `User-agent: *\nAllow: /\nSitemap: ${O}/sitemap.xml\n`)
+  fs.writeFileSync(path.join(fx, 'public/sitemap.xml'),
+    `<?xml version="1.0" encoding="UTF-8"?>\n<urlset><url><loc>${O}/</loc></url></urlset>`)
+  fs.writeFileSync(path.join(fx, 'app/layout.tsx'), [
+    `export const metadata = { metadataBase: new URL('${O}'), title: 'fx', description: 'fx' }`,
+    'export default function RootLayout({ children }) {',
+    '  return (<html><body>{children}',
+    // SW ブートストラップの母集団 floor を満たす最小形（登録だけ・巻き添えなし）
+    "    <script dangerouslySetInnerHTML={{ __html: `if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js')}` }} />",
+    '  </body></html>)',
+    '}',
+  ].join('\n'))
+  fs.writeFileSync(path.join(fx, 'app/opengraph-image.tsx'), 'export default function OG() { return null }\n')
+
+  const hits = []
+  const server = http.createServer((req, res) => {
+    hits.push(req.url.split('?')[0])
+    const u = req.url.split('?')[0]
+    if (u === '/external-404') { res.writeHead(404); res.end('nope'); return }
+    if (u === '/robots.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end(fs.readFileSync(path.join(fx, 'robots.txt'), 'utf8')); return }
+    if (u === '/sitemap.xml') { res.writeHead(200, { 'content-type': 'application/xml' }); res.end(fs.readFileSync(path.join(fx, 'public/sitemap.xml'), 'utf8')); return }
+    if (/opengraph-image|twitter-image|\.png$|\.webp$/.test(u)) { res.writeHead(200, { 'content-type': 'image/png' }); res.end('x'); return }
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end('<!doctype html><html><body>ok</body></html>')
+  })
+  await new Promise((r) => server.listen(0, '127.0.0.1', r))
+  const PORT = server.address().port
+  const BASE = `http://127.0.0.1:${PORT}`
+
+  // 外部リンクは**平文 http でフィクスチャのサーバを指す**。これは Day116 起票の
+  // 「https:// 限定」を解いたからこそ書ける形で、逆に言えば従来はローカルに閉じた
+  // 外部リンクの配線テストが**原理的に書けなかった**（外部＝実在ドメインしか作れない）。
+  const writePage = (externalPath) => fs.writeFileSync(path.join(fx, 'app/page.tsx'), [
+    'const ALL_CHARACTERS = [{ id: "GMCK", name: "ぶるとら" }]',
+    "export const metadata = { title: 'fx top', description: 'fx',",
+    `  alternates: { canonical: '${O}/' },`,
+    `  openGraph: { url: '${O}/', title: 'fx top', description: 'fx' } }`,
+    'export default function Page() {',
+    '  return (<main>',
+    '    <a href="/">home</a>',
+    '    {ALL_CHARACTERS.map((c) => <span key={c.id}>{c.name}</span>)}',
+    `    <a href="${BASE}${externalPath}">外部</a>`,
+    '  </main>)',
+    '}',
+  ].join('\n'))
+
+  const runFx = () => new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--base', BASE], {
+      env: {
+        ...process.env,
+        LINKS_SRC_DIR: fx,
+        // SW 本体の母集団は正本を見せる（この段の検査対象ではない＝specific > general の実演）
+        LINKS_SW_DIR: path.join(__dirname, '..', 'app'),
+        LINKS_ROBOTS: path.join(fx, 'robots.txt'),
+        LINKS_PUBLIC_DIR: path.join(fx, 'public'),
+      },
+    })
+    let stdout = ''
+    child.stdout.on('data', (d) => { stdout += d })
+    child.stderr.on('data', (d) => { stdout += d })
+    child.on('close', (status) => resolve({ status, stdout }))
+  })
+
+  // (a) 生きている外部リンク → 緑。かつ**外へ一歩も出ていない**こと。
+  hits.length = 0
+  writePage('/external-ok')
+  const rOk = await runFx()
+  const listedExternal = new RegExp(`${BASE}/external-ok`).test(rOk.stdout) || hits.includes('/external-ok')
+  if (rOk.status === 0 && listedExternal) {
+    ok('抽出層: フィクスチャの app/ から外部リンクを拾い、緑で終わる(LINKS_SRC_DIR が効いている)')
+  } else bad(`抽出層の override が効いていない: exit=${rOk.status} 外部を叩いた=${listedExternal} / ${rOk.stdout.split('\n').slice(-2).join(' ')}`)
+  if (hits.includes('/external-ok')) {
+    ok('抽出層: 平文 http の外部リンクが**実際に監視対象として叩かれる**(https 限定の解消が配線まで届いている)')
+  } else bad(`http の外部リンクが叩かれていない: ${[...new Set(hits)].join(' ')}`)
+
+  // (b) 死んでいる外部リンク → 致命。URL を名指しすること。
+  hits.length = 0
+  writePage('/external-404')
+  const rNg = await runFx()
+  const named = new RegExp(`✗ [^\\n]*${BASE}/external-404`).test(rNg.stdout)
+  const claimsAllOk = /✓ 全\d+件 OK/.test(rNg.stdout)
+  if (rNg.status === 1 && named && !claimsAllOk) {
+    ok('抽出層: フィクスチャの死んだ外部リンクを名指しして exit 1(振り分けの配線が生きている)')
+  } else bad(`死んだ外部リンクの扱いが想定外: exit=${rNg.status} 名指し=${named} 全件OK=${claimsAllOk}`)
+
+  // (c) **この段の肝**: 第三者ドメインへ一度も出ていない＝結果が回線状態に左右されない。
+  //     自オリジン(metadataBase)の表記は --list では正規URLのまま出るが、取得時には --base へ
+  //     書き換えられる（上の (a) で実際にフィクスチャのサーバへ来ていることを確認済み）。
+  //     壊れるのは**第三者ホスト**を叩いてしまう形なので、そこだけを見る。
+  const listOf = (env) => new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--base', BASE, '--list'], { env })
+    let stdout = ''
+    child.stdout.on('data', (d) => { stdout += d })
+    child.on('close', () => resolve(stdout))
+  })
+  const fxEnv = { ...process.env, LINKS_SRC_DIR: fx, LINKS_SW_DIR: path.join(__dirname, '..', 'app'),
+                  LINKS_ROBOTS: path.join(fx, 'robots.txt'), LINKS_PUBLIC_DIR: path.join(fx, 'public') }
+  const thirdPartyHosts = (out) => {
+    const urls = out.split('\n').flatMap((l) => l.match(/https?:\/\/[^\s\t]+/g) || [])
+    return [...new Set(urls.map((u) => hostOf(u)).filter((h) => h && !h.startsWith('127.0.0.1') && h !== 'egshugy.com'))]
+  }
+  const fxList = await listOf(fxEnv)
+  const fxThird = thirdPartyHosts(fxList)
+  if (fxList.trim() && fxThird.length === 0) {
+    ok('抽出層: フィクスチャの母集団に第三者ホストが1件も無い（実行環境の回線状態に左右されない）')
+  } else bad(`フィクスチャなのに第三者ホストを叩く: ${fxThird.join(' ')}`)
+
+  //     対照: 正本(既定)の母集団には第三者ホストが**実際に居る**。これが0件なら上の検査は
+  //     「そもそも外部が居ないだけ」で何も言っていないことになる（規則の空振り検知）。
+  const realList = await listOf({ ...process.env, LINKS_ROBOTS: path.join(fx, 'robots.txt'), LINKS_PUBLIC_DIR: path.join(fx, 'public') })
+  const realThird = thirdPartyHosts(realList)
+  if (realThird.length > 0) {
+    ok(`対照: 正本の母集団には第三者ホストが ${realThird.length}件居る＝フィクスチャの0件は override の効果`)
+  } else bad('正本にも第三者ホストが居ない＝この検査は何も区別できていない')
+
+  server.closeAllConnections?.()
+  server.close()
+  fs.rmSync(fx, { recursive: true, force: true })
+}
+
 console.log(`\n[selftest-check-links] 結果: pass=${pass} fail=${fail}`)
 process.exit(fail === 0 ? 0 : 1)

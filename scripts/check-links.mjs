@@ -25,12 +25,39 @@ const baseArg = baseIdx > -1 ? process.argv[baseIdx + 1] : null
 if (baseIdx > -1 && !baseArg) { console.error('--base にはURLを指定してください'); process.exit(2) }
 const BASE = (baseArg ?? 'https://egshugy.com').replace(/\/$/, '')
 
+// --- 監視対象の「抽出層」そのものの override(Day125・Day116 起票) ---
+// 既存の LINKS_APP_DIR / LINKS_SELFURL_DIR / LINKS_SW_DIR / LINKS_PUBLIC_DIR は
+// **各ガード専用**の口で、「そもそも何を叩くか」を決める抽出層——featured-apps /
+// EXPERIMENTS / app の JSX / live components——には口が無かった。
+// そのため配線テストは**正本の app/ をそのまま**読むしかなく、実在の外部ドメイン
+// (x.com・tiktok・googletagmanager)を本当に叩いていた＝実行環境の回線状態で結果が変わる。
+// 実測: セルフテストが **9回に1回**「本題と無関係な赤」を出していた(Day123 PM で計測)。
+// フィクスチャを見せられる口を1つ足し、抽出層まで含めて決定的に固定できるようにする。
+// 既定は従来どおり正本(ROOT)なので、この口を使わない限り挙動は不変。
+const SRC_ROOT = process.env.LINKS_SRC_DIR ? path.resolve(process.env.LINKS_SRC_DIR) : ROOT
+const SRC_APP = path.join(SRC_ROOT, 'app')
+const SRC_COMPONENTS = path.join(SRC_ROOT, 'components')
+
+// 抽出元のファイルを読む。**正本を見ているときに無いのは構成変更**なので、生の ENOENT を
+// 投げずに名指しで落とす（従来は featured-apps.tsx / app/page.tsx を無条件 readFileSync
+// しており、消えた日はスタックトレースだけが出て「何の抽出が死んだか」が読めなかった）。
+// フィクスチャ(LINKS_SRC_DIR)では任意＝最小の app/ だけで配線を踏める。
+function readSourceFile(file, label) {
+  if (fs.existsSync(file)) return fs.readFileSync(file, 'utf8')
+  if (SRC_ROOT === ROOT) {
+    console.log(`  ✗ 抽出失敗 [${label}] ${path.relative(ROOT, file)} が見つからない`)
+    console.log(`[check-links] ✗ 致命: ${label} の抽出元が無い（構成変更で監視が無言化した可能性）。`)
+    process.exit(1)
+  }
+  return ''
+}
+
 
 // あるコンポーネントが app/ の実ルートから import され実際にレンダーされているか。
 // import されていない = デッドコンポーネント(未レンダー)で、その内部リンクは live サイトの
 // どこからも辿れない phantom。
 function isImportedByApp(basename) {
-  const stack = [path.join(ROOT, 'app')]
+  const stack = [SRC_APP]
   const re = new RegExp(`from\\s+["'][^"']*${basename}["']`)
   while (stack.length) {
     const dir = stack.pop()
@@ -52,7 +79,7 @@ function isImportedByApp(basename) {
 //   (＝カタログとして復活した)時だけ拾い、それ以外は live 実リンク(experimentInternal +
 //   pageNavInternal)に委ねる(Day64)。
 const featuredLive = isImportedByApp('featured-apps')
-const featured = fs.readFileSync(path.join(ROOT, 'components/featured-apps.tsx'), 'utf8')
+const featured = readSourceFile(path.join(SRC_COMPONENTS, 'featured-apps.tsx'), 'featured-apps')
 const featuredInternal = featuredLive
   ? [...featured.matchAll(/href: "(\/[a-z0-9-]+\/)", comingSoon: (true|false)/g)]
       .filter((m) => m[2] === 'false')
@@ -60,7 +87,7 @@ const featuredInternal = featuredLive
   : []
 
 // 2) page.tsx の ALL_CHARACTERS から32キャラ画像URL + 図鑑カードのディープリンク先(types)を生成
-const page = fs.readFileSync(path.join(ROOT, 'app/page.tsx'), 'utf8')
+const page = readSourceFile(path.join(SRC_APP, 'page.tsx'), 'トップの配列(ALL_CHARACTERS/EXPERIMENTS)')
 
 // 2.5) page.tsx の EXPERIMENTS(あそぶ) からも稼働中(active|beta)ゲームの内部リンクを抽出。
 //   featured-apps とは別配列・別 shape(status ベース)で持つため、ここを見ないと playground の
@@ -88,7 +115,7 @@ function collectAppInternal(dir) {
   }
   return out
 }
-const pageNavInternal = collectAppInternal(path.join(ROOT, 'app'))
+const pageNavInternal = collectAppInternal(SRC_APP)
 
 // 2.7) app/**/page.tsx から「実際に配信されるルート」そのものを列挙する(Day97)。
 //   2)〜2.6) はいずれも **リンク**(href / 配列の href フィールド)を辿る抽出で、どこからも
@@ -106,7 +133,7 @@ function collectPageFiles(dir, prefix = '') {
   }
   return out
 }
-const { routes: appRoutes, skipped: skippedRoutes } = routesFromPageFiles(collectPageFiles(path.join(ROOT, 'app')))
+const { routes: appRoutes, skipped: skippedRoutes } = routesFromPageFiles(collectPageFiles(SRC_APP))
 // 抽出0件の floor(Day91 と同型): app/ に page が1つも無いことは静的ポータルではありえず、
 // 0件は「ルート規約の変更でこの層が黙って死んだ」ことを意味する。そのまま進むと
 // リンク由来だけの旧挙動へ静かに退化する＝この修正自体が無言で無効化されるため即座に落とす。
@@ -159,7 +186,7 @@ function collectTsx(dir) {
 // が hard ターゲットとして叩かれていた。誰も辿れないリンクの404で cron が red になる
 // (＝false-red)一方、live 側のハンドルとの食い違いは検知できないという逆立ちが起きる。
 function collectLiveComponents() {
-  const dir = path.join(ROOT, 'components')
+  const dir = SRC_COMPONENTS
   if (!fs.existsSync(dir)) return ''
   let out = ''
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -170,7 +197,7 @@ function collectLiveComponents() {
   }
   return out
 }
-const liveSrc = collectTsx(path.join(ROOT, 'app')) + collectLiveComponents()
+const liveSrc = collectTsx(SRC_APP) + collectLiveComponents()
 const externals = extractExternalUrls(liveSrc, { exclude: EXCLUDE })
 
 // 一時失敗(タイムアウト/瞬断/5xx/429)は fetchWithRetry が数回リトライしてから確定する。
@@ -198,7 +225,7 @@ async function check(url) {
 // ②PWA 必須資産 /manifest.json・/sw.js まで対象化(拡張子が画像でないため無検査だった)。
 function scanLocalAssetRefs() {
   const refs = new Set()
-  const stack = [path.join(ROOT, 'app')]
+  const stack = [SRC_APP]
   while (stack.length) {
     const dir = stack.pop()
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -222,7 +249,7 @@ for (const p of localMissing) console.log(`  ✗ MISSING  [ローカル静的] p
 // origin は app/layout.tsx の metadataBase を単一の出所とする（二重管理を作らない）。
 // LINKS_SELFURL_DIR は selftest がフィクスチャを見せるための非破壊 override(Day94 の
 // UPTIME_APP_DIR と同じ作法)。正本を一時改竄せずに「ずれ→exit 1」の配線まで固定できる。
-const SELFURL_DIR = process.env.LINKS_SELFURL_DIR ? path.resolve(process.env.LINKS_SELFURL_DIR) : path.join(ROOT, 'app')
+const SELFURL_DIR = process.env.LINKS_SELFURL_DIR ? path.resolve(process.env.LINKS_SELFURL_DIR) : SRC_APP
 const selfOrigin = extractMetadataBaseOrigin(fs.readFileSync(path.join(SELFURL_DIR, 'layout.tsx'), 'utf8'))
 if (!selfOrigin) {
   console.log('  ✗ 抽出失敗 [自己URL] app/layout.tsx から metadataBase を読めない')
@@ -257,7 +284,7 @@ if (selfUrlMismatches.length > 0) {
 // 唯一の内部リンク)が名前を持たず、スクリーンリーダーでは行き止まりになっていた。
 // 自己URLずれと同じ「ネットワークを見ずに確定する静的欠陥」なのでここで落とす。
 // LINKS_APP_DIR は selftest がフィクスチャを見せるための非破壊 override(LINKS_SELFURL_DIR と同作法)。
-const APP_DIR = process.env.LINKS_APP_DIR ? path.resolve(process.env.LINKS_APP_DIR) : path.join(ROOT, 'app')
+const APP_DIR = process.env.LINKS_APP_DIR ? path.resolve(process.env.LINKS_APP_DIR) : SRC_APP
 // 走査は app/ だけでなく components/ も見る(Day113)。実測では画面の実体は components/ 側に多く
 // (featured-apps / footer / links-section 等)、**アイコンだけのリンク/ボタンが最も生えやすいのは
 // そちら**なのに、Day104 の母集団は app/ だけだった＝コンポーネントに退行が入っても永久に緑。
@@ -368,7 +395,7 @@ if (a11yOffenders.length > 0) {
 // 合計が0にならず「ブートストラップが消えた(＝/sw.js が二度と登録されない)」が隠れる。
 // 守っている対象が別なら floor も別に置く。
 {
-  const SW_DIR = process.env.LINKS_SW_DIR ? path.resolve(process.env.LINKS_SW_DIR) : path.join(ROOT, 'app')
+  const SW_DIR = process.env.LINKS_SW_DIR ? path.resolve(process.env.LINKS_SW_DIR) : SRC_APP
   const SW_FILE = process.env.LINKS_SW_FILE ? path.resolve(process.env.LINKS_SW_FILE) : path.join(ROOT, 'public/sw.js')
   const bootEntries = collectPageFiles(SW_DIR)
     .filter((f) => /\.tsx?$/.test(f))
