@@ -1747,6 +1747,30 @@ self.addEventListener('fetch', (event) => {
   if (c.length === 0) ok('既定メタ: トップは既定が自分の identity なので対象外(誤検知しない)')
   else bad('トップを違反にしている')
 
+  // Day123 PM: 「自前のメタ」の判定が **UI データの title:** で満たされていた。
+  // 実測で `app/page.tsx` と `app/noxa/page.tsx` は metadata を1つも宣言していないのに
+  // 朝の規則では白（noxa は layout.tsx が本物のメタを持つので結果だけは正しかった）。
+  // カード配列を持つページを1つ足せば、メタが無くても静かに合格する形だった。
+  const UI_CARDS_PAGE = `"use client"
+const cards = [
+  { title: 'ぺかりんチンチロ', description: '最下位回避ロジック搭載' },
+  { title: 'ワードウルフ', description: 'みんなで遊べる' },
+]
+export default function Page() { return cards.map((c) => c.title) }`
+  const d2 = findRoutesNamingLayoutDefault([D('/games/', [F('games/page.tsx', UI_CARDS_PAGE)])])
+  if (d2.length === 1 && d2[0].route === '/games/') {
+    ok('既定メタ: UI データの title:/description: を「自前のメタ」と読み違えない(宣言の有無まで見る)')
+  } else bad(`UI データを自前メタと誤認している: ${JSON.stringify(d2)}`)
+
+  // 対照: 本物の宣言（generateMetadata 形式も含む）は従来どおり合格させる（厳しくしすぎない）
+  const d3 = findRoutesNamingLayoutDefault([D('/games/', [
+    F('games/page.tsx', `${UI_CARDS_PAGE}
+export async function generateMetadata() { return { title: 'ゲーム一覧', description: '…' } }`),
+  ])])
+  if (d3.length === 0) ok('対照: generateMetadata で宣言していれば従来どおり合格(過剰厳格化していない)')
+  else bad(`本物のメタ宣言を違反にしている: ${JSON.stringify(d3)}`)
+
+
   const d = findRoutesNamingLayoutDefault([D('/workspaces/', [
     F('workspaces/page.tsx', CLIENT_PAGE),
     F('workspaces/layout.tsx', 'export const metadata = { robots: { index: false, follow: false } }'),
@@ -2039,11 +2063,21 @@ self.addEventListener('fetch', (event) => {
   if (rFlaky === null) {
     bad('瞬断のケースを測れなかった（実行環境の回線が3回とも不通と診断された＝環境側の問題）')
   } else {
-    const namedRecovered = new RegExp(`接続不能だった 1件は \\d+ms 後の再確認で回復[^\\n]*${BASE}${TARGET}`).test(rFlaky.stdout)
+    // 件数(`1件`)ではなく **このフィクスチャの URL が回復として名指しされたか** で見る(Day123 PM)。
+    // 朝の実装は `接続不能だった 1件は …` と件数を焼き込んでおり、**実行環境の回線が細って
+    // 実在の外部(gtag 等)が同じ回に一過性で落ちる**と「2件」になって本題と無関係に赤くなる
+    // （実測で 9回中1回。この段の (a) と blamedRecovery では同じ罠を避けているのに、
+    //  本題のアサートにだけ件数が残っていた＝**自分で書いた作法から本命だけが漏れていた**）。
+    const namedRecovered = new RegExp(`再確認で回復[^\\n]*${BASE}${TARGET}`).test(rFlaky.stdout)
     const blamedTarget = new RegExp(`✗ [^\\n]*\\s${BASE}${TARGET}`).test(rFlaky.stdout)
     if (namedRecovered && !blamedTarget) {
       ok('配線: 一過性の瞬断は再確認で回復し、リンクを致命として名指ししない(かつ回復したことを名乗る)')
-    } else bad(`瞬断の扱いが想定外: 回復の名指し=${namedRecovered} 致命の名指し=${blamedTarget}`)
+    } else {
+      // 失敗したときに**何が起きたか**を読めるようにする（「false false」だけでは次に踏んだ
+      // 人が原因へ辿れない＝Day108「壊れ方は名前を言えるかで評価する」の、テスト側の版）。
+      const evidence = rFlaky.stdout.split('\n').filter((l) => /接続不能|再確認|回線|✗/.test(l)).slice(0, 4).join(' / ')
+      bad(`瞬断の扱いが想定外: 回復の名指し=${namedRecovered} 致命の名指し=${blamedTarget} — 実出力: ${evidence || '(該当行なし)'}`)
+    }
   }
 
   // (c) 対照: **ずっと**接続できない1本は緑にならず、その URL が名指しされる。

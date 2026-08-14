@@ -355,6 +355,14 @@ export function findRedirectStubsWithoutNoindex(routeDirs) {
 //   - ルート直下(`/`)はレイアウト既定が自分自身の identity なので対象外
 //   - noindex を宣言しているルートは索引されないので対象外（重複コンテンツにならない）
 const OWN_META_RE = /(?:^|[\s{,])(?:title|description)\s*:/m
+// 「自前のメタを持っている」の判定に **メタ宣言そのものの有無**を足す(Day123 PM)。
+// 朝の実装は `title:` / `description:` がソースのどこかに在れば合格としており、
+// **UI のカード配列**（`{ title: '…', description: '…' }` の並び）でも合格してしまう。
+// 実測: `app/page.tsx` と `app/noxa/page.tsx` は metadata を1つも宣言していないのに
+// この規則では白（noxa は同階層の layout.tsx が本物のメタを持つので結果は正しいが、
+// **理由が間違っている**）。ルートを1つ足すとき、カード配列を持つページなら
+// メタが無くても静かに合格する＝規則が守るはずのものを守らない。
+const META_DECL_RE = /export\s+(?:const\s+metadata\b|(?:async\s+)?function\s+generateMetadata\b)/
 
 /**
  * routeDirs: [{ route: '/workspaces/', files: [{ rel, src }] }]
@@ -366,7 +374,9 @@ export function findRoutesNamingLayoutDefault(routeDirs) {
     if (route === '/') continue                                   // トップは既定が自分の identity
     if (!files.some((f) => /(?:^|\/)page\.(?:tsx|ts|jsx|js|mdx|md)$/.test(f.rel))) continue // ルートでない
     if (files.some((f) => NOINDEX_RE.test(f.src))) continue        // 索引されないなら重複しない
-    if (files.some((f) => OWN_META_RE.test(f.src))) continue       // 自前のメタを持っている
+    // 自前のメタを持っている＝**メタ宣言があり、その中身に title/description がある**
+    // （どちらか片方だけでは、UI データの title: や openGraph だけの宣言を取り違える）
+    if (files.some((f) => META_DECL_RE.test(f.src) && OWN_META_RE.test(f.src))) continue
     out.push({ route, files: files.map((f) => f.rel) })
   }
   return out
