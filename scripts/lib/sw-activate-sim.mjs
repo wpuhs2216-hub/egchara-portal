@@ -138,3 +138,68 @@ export async function simulateSwOfflineFallback(swSource, { origin }) {
   if (!res) return { source: 'none' }
   return { source: res.__from ?? (openedForRead ? openedForRead : 'none') }
 }
+
+/**
+ * SW を偽スコープで実走させ、**何をキャッシュに書いたか**を実測する(Day128)。
+ *
+ * activate(消す側)と offline フォールバック(読む側)には実走のシミュレータがあったが、
+ * **書く側だけは一度も踏まれていなかった**——Day107 が置いた「自オリジン かつ 成功応答 かつ
+ * opaque でない」という規則は、ソースを読めば確かにそこに在るが、`isCacheable` を消しても
+ * 条件を1つ緩めても、テストは全部緑のままだった。規則ではなく結果を見る(Day110 と同じ理由)。
+ *
+ * 書く側が緩むと起きること: ①opaque 応答を put すると仕様上 TypeError＝ページ表示のたびに
+ * 未処理の拒否 ②404 を保存すると次にオフラインになった回に**エラーページが焼き付く**
+ * ③第三者の応答を保存すると、オリジン共有の Cache Storage を同居アプリと奪い合う。
+ *
+ * @param swSource public/sw.js の中身
+ * @param origin   自オリジン
+ * @param cases    [{ label, url, status, type }] 応答の種類。type は 'basic'|'cors'|'opaque' 等
+ * @returns {Promise<{written: string[], hasFetch: boolean}>} written は put された URL のラベル
+ */
+export async function simulateSwCacheWrites(swSource, { origin, cases }) {
+  const listeners = new Map()
+  const written = []
+  const caches = {
+    keys: async () => [],
+    delete: async () => true,
+    match: async () => undefined,
+    open: async () => ({
+      put: async (req) => { written.push(typeof req === 'string' ? req : req.url) },
+      match: async () => undefined,
+    }),
+  }
+  const self = {
+    location: { origin },
+    addEventListener: (type, fn) => listeners.set(type, fn),
+    skipWaiting: () => {},
+    clients: { claim: async () => {} },
+  }
+  let current = null
+  const ctx = {
+    self, caches, URL, Promise, console,
+    fetch: async () => ({
+      ok: current.status >= 200 && current.status < 300,
+      status: current.status,
+      type: current.type,
+      clone: () => ({ __clone: true }),
+    }),
+  }
+  ctx.globalThis = ctx
+  vm.createContext(ctx)
+  vm.runInContext(swSource, ctx)
+  if (!listeners.has('fetch')) return { written, hasFetch: false }
+
+  for (const c of cases) {
+    current = c
+    let responded = null
+    listeners.get('fetch')({
+      // destination はブラウザが与える値。既定は資産(script)として踏む。
+      request: { url: c.url, method: c.method ?? 'GET', destination: c.destination ?? 'script' },
+      respondWith: (p) => { responded = p },
+    })
+    await Promise.resolve(responded).catch(() => null)
+    // put は respondWith の外で走る（await されていない）ので1ティック待つ
+    await new Promise((r) => setImmediate(r))
+  }
+  return { written, hasFetch: true }
+}

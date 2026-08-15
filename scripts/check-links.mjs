@@ -15,7 +15,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fetchWithRetry } from './fetch-with-retry.mjs'
 import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromPageFiles, normalizeRoutePath, findSelfUrlMismatches, extractMetadataBaseOrigin, classifyTargetUrl, canonicalizeTargetUrl, crossRepoRootFromRoster, CROSS_REPO_PREFIXES, findIconOnlyControlsWithoutName, findRedirectStubsWithoutNoindex, findRoutesNamingLayoutDefault, ogImageRoutesFromFiles, classifyOgDelivery, findSitemapCoverageGaps, findOriginWideSwWipes, findRobotsSitemapIssues, classifyServedRobots, classifyServedSitemap, isServedSitemapFatal, partitionLinkResults, isUnreachableResult, hostOf, diagnoseConnectFailures, classifyRecheck, resolveConnectFailures } from './lib/extract-targets.mjs'
-import { simulateSwActivate } from './lib/sw-activate-sim.mjs'
+import { simulateSwActivate, simulateSwCacheWrites } from './lib/sw-activate-sim.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -37,6 +37,16 @@ const BASE = (baseArg ?? 'https://egshugy.com').replace(/\/$/, '')
 const SRC_ROOT = process.env.LINKS_SRC_DIR ? path.resolve(process.env.LINKS_SRC_DIR) : ROOT
 const SRC_APP = path.join(SRC_ROOT, 'app')
 const SRC_COMPONENTS = path.join(SRC_ROOT, 'components')
+const SRC_PUBLIC = path.join(SRC_ROOT, 'public')
+// 各ガード専用の口（specific）は「未指定なら抽出層（general）に従う」を**例外なく**既定にする(Day128)。
+// Day125 はこの層を作ったが、適用したのは app/ 起点のガードだけで、components/ と public/ 配下を
+// 見るガード（a11y・sitemap・robots・SW 本体）は `ROOT` 直書きのまま残っていた。
+// 実測(Day128): `LINKS_SRC_DIR` だけを渡してフィクスチャを踏むと、**フィクスチャの
+// components/ に置いた a11y 違反も、壊した public/sitemap.xml も検出されない**（rc=0）。
+// 専用の口を1つずつ名指しすれば検出される＝規則は生きていて、届いていなかったのは general の口。
+// 逆向きの害のほうが重い: フィクスチャ実行が**正本を読み続ける**ので、正本の components/ に
+// 違反が入った日に Day125 の配線テストが**本題と無関係に赤くなる**（Day125 が消したはずの
+// flaky の作り直し）。層の例外は「次の人が予測できない」ので作らない。
 
 // 抽出元のファイルを読む。**正本を見ているときに無いのは構成変更**なので、生の ENOENT を
 // 投げずに名指しで落とす（従来は featured-apps.tsx / app/page.tsx を無条件 readFileSync
@@ -291,7 +301,7 @@ const APP_DIR = process.env.LINKS_APP_DIR ? path.resolve(process.env.LINKS_APP_D
 // 現時点の指摘は0件だが「今たまたま違反が無い」と「見ている」は別（母集団の穴を先に塞ぐ）。
 const COMPONENTS_DIR = process.env.LINKS_COMPONENTS_DIR
   ? path.resolve(process.env.LINKS_COMPONENTS_DIR)
-  : path.join(ROOT, 'components')
+  : SRC_COMPONENTS
 // ルート単位のガード(noindex スタブ)は app/ の実ルートだけが対象なので、母集団は分けて持つ。
 // a11y と同じ配列を使い回すと、components/ を足した瞬間に「ルートでないもの」をルート扱いする。
 const appTsxEntries = collectPageFiles(APP_DIR)
@@ -396,7 +406,7 @@ if (a11yOffenders.length > 0) {
 // 守っている対象が別なら floor も別に置く。
 {
   const SW_DIR = process.env.LINKS_SW_DIR ? path.resolve(process.env.LINKS_SW_DIR) : SRC_APP
-  const SW_FILE = process.env.LINKS_SW_FILE ? path.resolve(process.env.LINKS_SW_FILE) : path.join(ROOT, 'public/sw.js')
+  const SW_FILE = process.env.LINKS_SW_FILE ? path.resolve(process.env.LINKS_SW_FILE) : path.join(SRC_PUBLIC, 'sw.js')
   const bootEntries = collectPageFiles(SW_DIR)
     .filter((f) => /\.tsx?$/.test(f))
     .map((f) => ({ file: `${path.relative(ROOT, SW_DIR)}/${f}`, src: fs.readFileSync(path.join(SW_DIR, f), 'utf8') }))
@@ -429,7 +439,7 @@ if (a11yOffenders.length > 0) {
 // 判定に使う「自分のキャッシュ名」もソースを読まずに実測する(fetch を1本流して caches.open()
 // に渡される名前を拾う)ので、定数名や記法が変わっても追随する。
 {
-  const SW_FILE = process.env.LINKS_SW_FILE ? path.resolve(process.env.LINKS_SW_FILE) : path.join(ROOT, 'public/sw.js')
+  const SW_FILE = process.env.LINKS_SW_FILE ? path.resolve(process.env.LINKS_SW_FILE) : path.join(SRC_PUBLIC, 'sw.js')
   if (!fs.existsSync(SW_FILE)) {
     console.log(`  ✗ 欠落  [SW実走] ${path.relative(ROOT, SW_FILE)} が無い`)
     console.log('[check-links] ✗ 致命: SW 本体が見つからない（配信されている /sw.js の実体が消えた、または置き場が変わった）。')
@@ -455,9 +465,27 @@ if (a11yOffenders.length > 0) {
   if (sim.ownPrefix && !sim.deleted.includes(sim.ownStaleKey)) {
     swFatal.push(`activate が自分の旧版キャッシュ ${sim.ownStaleKey} を消さない（後片付けが no-op へ退化し、旧版が永久に残る）`)
   }
+  // 書く側も結果で見る(Day128)。消す側(activate)と読む側(Day122 のフォールバック)には
+  // 実走の判定があったのに、**何を保存するか**だけは規則がソースに在るだけで誰も踏んでいなかった。
+  // 緩むと: opaque を put して未処理の拒否が出続ける / 404 を保存して次のオフラインに
+  // エラーページが焼き付く / 第三者の応答でオリジン共有の Cache Storage を同居アプリと奪い合う。
+  const WRITE_CASES = [
+    { label: '自オリジンの成功応答', url: `${selfOrigin}/icon-192.png`, status: 200, type: 'basic', want: true },
+    { label: '第三者の CORS 応答', url: 'https://www.googletagmanager.com/gtag/js', status: 200, type: 'cors', want: false },
+    { label: '第三者の opaque 応答', url: 'https://static.cloudflareinsights.com/beacon.js', status: 200, type: 'opaque', want: false },
+    { label: '自オリジンの 404', url: `${selfOrigin}/nope`, status: 404, type: 'basic', want: false },
+  ]
+  const writes = await simulateSwCacheWrites(fs.readFileSync(SW_FILE, 'utf8'), { origin: selfOrigin, cases: WRITE_CASES })
+  for (const c of WRITE_CASES) {
+    const got = writes.written.includes(c.url)
+    if (got === c.want) continue
+    swFatal.push(c.want
+      ? `${c.label}をキャッシュしない（オフライン時に出せるものが無くなる＝保存側が no-op へ退化）`
+      : `${c.label}をキャッシュする（${c.url}）`)
+  }
   if (swFatal.length > 0) {
     for (const w of swFatal) console.log(`  ✗ 実走  [SW実走] ${path.relative(ROOT, SW_FILE)}: ${w}`)
-    console.log(`[check-links] ✗ 致命: SW の activate を実走させた結果が不正 ${swFatal.length}件（全ルートが 200 を返すため HTTP 検査では永久に検知できない）。`)
+    console.log(`[check-links] ✗ 致命: SW を実走させた結果が不正 ${swFatal.length}件（全ルートが 200 を返すため HTTP 検査では永久に検知できない）。`)
     process.exit(1)
   }
 }
@@ -482,8 +510,8 @@ const classify = (url) => classifyTargetUrl(url, BASE, crossPrefixes)
 // (sitemap を増やしても申告さえすれば自動的に監視へ載る／申告だけ増やして実体が無ければ
 // 下の静的突合が落とす、の両側になる)。
 // LINKS_ROBOTS / LINKS_PUBLIC_DIR は selftest 用の非破壊 override(他ガードと別の口)。
-const ROBOTS_PATH = process.env.LINKS_ROBOTS ? path.resolve(process.env.LINKS_ROBOTS) : path.join(ROOT, 'public/robots.txt')
-const ROBOTS_PUBLIC_DIR = process.env.LINKS_PUBLIC_DIR ? path.resolve(process.env.LINKS_PUBLIC_DIR) : path.join(ROOT, 'public')
+const ROBOTS_PATH = process.env.LINKS_ROBOTS ? path.resolve(process.env.LINKS_ROBOTS) : path.join(SRC_PUBLIC, 'robots.txt')
+const ROBOTS_PUBLIC_DIR = process.env.LINKS_PUBLIC_DIR ? path.resolve(process.env.LINKS_PUBLIC_DIR) : SRC_PUBLIC
 const robotsTxt = fs.readFileSync(ROBOTS_PATH, 'utf8')
 // public/ 配下に実在する sitemap(再帰)。名前規約はファイル名に sitemap を含む .xml。
 const publicSitemapPaths = (function collectSitemaps(dir, prefix = '') {
@@ -588,8 +616,8 @@ if (misclassified.length > 0) {
 // 他のガードの母集団まで差し替えてしまうと、1つのフィクスチャで無関係なガードが落ちて
 // 「どのガードを固定したのか」が曖昧になる。
 {
-  const SITEMAP_DIR = process.env.LINKS_SITEMAP_DIR ? path.resolve(process.env.LINKS_SITEMAP_DIR) : path.join(ROOT, 'app')
-  const SITEMAP_PATH = process.env.LINKS_SITEMAP ? path.resolve(process.env.LINKS_SITEMAP) : path.join(ROOT, 'public/sitemap.xml')
+  const SITEMAP_DIR = process.env.LINKS_SITEMAP_DIR ? path.resolve(process.env.LINKS_SITEMAP_DIR) : SRC_APP
+  const SITEMAP_PATH = process.env.LINKS_SITEMAP ? path.resolve(process.env.LINKS_SITEMAP) : path.join(SRC_PUBLIC, 'sitemap.xml')
   const sitemapXml = fs.readFileSync(SITEMAP_PATH, 'utf8')
   const sitemapFiles = collectPageFiles(SITEMAP_DIR)
   // ルートごとに、そのルートの page/layout を連結したソースを渡す(noindex 宣言はここに出る)。

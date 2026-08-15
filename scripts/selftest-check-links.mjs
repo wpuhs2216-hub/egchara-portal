@@ -32,7 +32,7 @@ import { extractExternalUrls, extractCharIds, extractLocalAssetRefs, routesFromP
 // Day107 の静的規則は `caches.keys()` の結果を絞らず delete する形を黒としたが、実害として
 // 残っていたのは `keys.filter((k) => k !== CACHE_NAME)` ＝ filter はあるのに他人のものを
 // 全部消す反転形で、規則の上では白だった。SW は素の JS なので実走できる。
-import { simulateSwActivate, simulateSwOfflineFallback, ownPrefixOf } from './lib/sw-activate-sim.mjs'
+import { simulateSwActivate, simulateSwCacheWrites, simulateSwOfflineFallback, ownPrefixOf } from './lib/sw-activate-sim.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -2166,8 +2166,11 @@ export async function generateMetadata() { return { title: 'ゲーム一覧', de
       env: {
         ...process.env,
         LINKS_SRC_DIR: fx,
-        // SW 本体の母集団は正本を見せる（この段の検査対象ではない＝specific > general の実演）
+        // SW 本体の母集団も実体も正本を見せる（この段の検査対象ではない＝specific > general の実演）。
+        // `LINKS_SW_FILE` は Day128 で必要になった: それまで SW 本体の既定が `ROOT` 直書きで、
+        // general の口を渡してもフィクスチャではなく正本を読んでいた（＝層が届いていなかった）。
         LINKS_SW_DIR: path.join(__dirname, '..', 'app'),
+        LINKS_SW_FILE: path.join(__dirname, '..', 'public/sw.js'),
         LINKS_ROBOTS: path.join(fx, 'robots.txt'),
         LINKS_PUBLIC_DIR: path.join(fx, 'public'),
       },
@@ -2211,6 +2214,7 @@ export async function generateMetadata() { return { title: 'ゲーム一覧', de
     child.on('close', () => resolve(stdout))
   })
   const fxEnv = { ...process.env, LINKS_SRC_DIR: fx, LINKS_SW_DIR: path.join(__dirname, '..', 'app'),
+                  LINKS_SW_FILE: path.join(__dirname, '..', 'public/sw.js'),
                   LINKS_ROBOTS: path.join(fx, 'robots.txt'), LINKS_PUBLIC_DIR: path.join(fx, 'public') }
   const thirdPartyHosts = (out) => {
     const urls = out.split('\n').flatMap((l) => l.match(/https?:\/\/[^\s\t]+/g) || [])
@@ -2233,6 +2237,151 @@ export async function generateMetadata() { return { title: 'ゲーム一覧', de
   server.closeAllConnections?.()
   server.close()
   fs.rmSync(fx, { recursive: true, force: true })
+}
+
+// 63 抽出層の口が**全ガードに届いている**こと(Day128・Day125 の層の完成)。
+//   Day125 は「specific > general > 既定」の層を作ったが、general(`LINKS_SRC_DIR`)を既定に
+//   したのは app/ 起点のガードだけで、components/ と public/ 配下を見る4つ——a11y・sitemap・
+//   robots・SW 本体——は `ROOT` 直書きのまま残っていた。
+//   実測(Day128・修正前): `LINKS_SRC_DIR` だけを渡すと、**フィクスチャの components/ に置いた
+//   a11y 違反も、壊した public/sitemap.xml も検出されず rc=0**。専用の口を1つずつ名指しすれば
+//   検出される＝規則は生きていて、届いていなかったのは general の口だった。
+//   害は両方向にある: ①フィクスチャの内容が検査されない（テストを書いたつもりで空振り）
+//   ②**正本の状態がフィクスチャ実行に混ざる**——正本の components/ に違反が入った日に
+//   Day125 の配線テストが本題と無関係に赤くなる（Day125 が消したはずの flaky の作り直し）。
+{
+  const fx = fs.mkdtempSync(path.join(os.tmpdir(), 'links-d128-'))
+  const O = 'https://egshugy.com'
+  const w = (rel, src) => {
+    const full = path.join(fx, rel)
+    fs.mkdirSync(path.dirname(full), { recursive: true })
+    fs.writeFileSync(full, src)
+    return full
+  }
+  // 最小のフィクスチャ「ソースルート」: app/ + components/ + public/ を自分で持つ。
+  w('app/layout.tsx', [
+    `export const metadata = { metadataBase: new URL('${O}'), title: 'fx', description: 'fx' }`,
+    'export default function RootLayout({ children }) {',
+    '  return (<html><body>{children}',
+    "    <script dangerouslySetInnerHTML={{ __html: `if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js')}` }} />",
+    '  </body></html>)',
+    '}',
+  ].join('\n'))
+  w('app/page.tsx', [
+    'const ALL_CHARACTERS = [{ id: "GMCK", name: "ぶるとら" }]',
+    "export const metadata = { title: 'fx top', description: 'fx',",
+    `  alternates: { canonical: '${O}/' },`,
+    `  openGraph: { url: '${O}/', title: 'fx top', description: 'fx' } }`,
+    'export default function Page() {',
+    '  return (<main><a href="/">home</a>{ALL_CHARACTERS.map((c) => <span key={c.id}>{c.name}</span>)}</main>)',
+    '}',
+  ].join('\n'))
+  w('app/opengraph-image.tsx', 'export default function OG() { return null }\n')
+  w('public/robots.txt', `User-agent: *\nAllow: /\nSitemap: ${O}/sitemap.xml\n`)
+  w('public/sitemap.xml', `<?xml version="1.0" encoding="UTF-8"?>\n<urlset><url><loc>${O}/</loc></url></urlset>`)
+  // SW 本体はフィクスチャにも実体が要る（無ければ「配信されている /sw.js が消えた」で致命＝正しい）
+  fs.copyFileSync(path.join(__dirname, '..', 'public/sw.js'), path.join(fx, 'public/sw.js'))
+  // SW ブートストラップの母集団だけは正本を見せる（register だけの最小 layout では floor を
+  // 満たせないため。specific > general の実演で、この段は今回の検査対象ではない）。
+  const SW_DIR = path.join(__dirname, '..', 'app')
+  const runFx = (extra = {}) => spawnSync(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--list'],
+    { encoding: 'utf8', env: { ...process.env, LINKS_SRC_DIR: fx, LINKS_SW_DIR: SW_DIR, ...extra } })
+
+  // (a) 下限: この最小ソースルートは general の口だけで緑になる（フィクスチャが不完全でないこと）。
+  const rBase = runFx()
+  if (rBase.status === 0) ok('抽出層: LINKS_SRC_DIR だけでフィクスチャの全段が緑になる（口が届いている）')
+  else bad(`最小フィクスチャが緑にならない: status=${rBase.status} ${rBase.stdout.split('\n').filter((l) => l.includes('✗')).slice(0, 2).join(' / ')}`)
+
+  // (b) components/ の a11y: general の口だけでフィクスチャ側が読まれること。
+  //     修正前はここで**正本の components/** が読まれ、フィクスチャの違反は素通りしていた。
+  w('components/widget.tsx', 'export default function W() {\n  return <button onClick={x}><Icon className="w-4" /></button>\n}\n')
+  const rA11y = runFx()
+  if (rA11y.status === 1 && /\[a11y\] components\/widget\.tsx/.test(rA11y.stdout)) {
+    ok('抽出層→a11y: フィクスチャの components/ が読まれる（正本を読み続けない）')
+  } else bad(`a11y に general の口が届いていない: status=${rA11y.status}`)
+  fs.rmSync(path.join(fx, 'components/widget.tsx'))
+
+  // (c) sitemap: 同上。フィクスチャの sitemap と実ルートの不整合を捕まえること。
+  w('public/sitemap.xml', '<?xml version="1.0" encoding="UTF-8"?>\n<urlset><url><loc>https://egshugy.com/nowhere/</loc></url></urlset>')
+  const rMap = runFx()
+  if (rMap.status === 1 && /\[sitemap\]/.test(rMap.stdout)) {
+    ok('抽出層→sitemap: フィクスチャの public/sitemap.xml が読まれる（正本を読み続けない）')
+  } else bad(`sitemap に general の口が届いていない: status=${rMap.status}`)
+  w('public/sitemap.xml', `<?xml version="1.0" encoding="UTF-8"?>\n<urlset><url><loc>${O}/</loc></url></urlset>`)
+
+  // (d) robots: 同上。フィクスチャの robots.txt が読まれること。
+  w('public/robots.txt', 'User-agent: *\nDisallow: /\n')
+  const rRobots = runFx()
+  if (rRobots.status === 1 && /robots/i.test(rRobots.stdout)) {
+    ok('抽出層→robots: フィクスチャの public/robots.txt が読まれる（正本を読み続けない）')
+  } else bad(`robots に general の口が届いていない: status=${rRobots.status}`)
+  w('public/robots.txt', `User-agent: *\nAllow: /\nSitemap: ${O}/sitemap.xml\n`)
+
+  // (e) SW 本体: 同上。フィクスチャ側の sw.js が読まれること（壊した版を置いて実測する）。
+  //     activate が自分の旧版を消さない形＝Day110 の floor に引っかかる版を置く。
+  w('public/sw.js', [
+    "const CACHE_NAME = 'portal-v1'",
+    'self.addEventListener("install", () => self.skipWaiting())',
+    'self.addEventListener("activate", (event) => { event.waitUntil(self.clients.claim()) })',
+    'self.addEventListener("fetch", (event) => {',
+    '  if (event.request.method !== "GET") return',
+    '  event.respondWith(fetch(event.request).then((r) => { caches.open(CACHE_NAME).then((c) => c.put(event.request, r.clone())); return r }))',
+    '})',
+  ].join('\n'))
+  const rSw = runFx()
+  if (rSw.status === 1 && /SW実走|後片付け|旧版/.test(rSw.stdout)) {
+    ok('抽出層→SW本体: フィクスチャの public/sw.js が読まれる（正本を読み続けない）')
+  } else bad(`SW 本体に general の口が届いていない: status=${rSw.status}`)
+
+  // (f) 逆向きの下限: specific は general より強い（専用の口で正本を見せ直せる）。
+  const rSpecific = runFx({ LINKS_SW_FILE: path.join(__dirname, '..', 'public/sw.js') })
+  if (rSpecific.status === 0) ok('層の順序: specific(LINKS_SW_FILE) が general(LINKS_SRC_DIR) を上書きする')
+  else bad(`specific > general が効いていない: status=${rSpecific.status}`)
+
+  fs.rmSync(fx, { recursive: true, force: true })
+}
+
+// 64 SW の**書く側**を実走で固定する(Day128・Day127 egtype からの横断)。
+//   activate(消す側・Day110)と offline フォールバック(読む側・Day122)には実走の検査があるのに、
+//   **書く側だけは一度も踏まれていなかった**。Day107 の「自オリジン かつ 成功応答 かつ opaque
+//   でない」という規則はソースに在るが、`isCacheable` ごと消してもテストは全部緑のままだった。
+//   緩むと: ①opaque を put すると仕様上 TypeError（表示のたびに未処理の拒否）②404 を保存すると
+//   次のオフラインで**エラーページが焼き付く** ③第三者の応答でオリジン共有の Cache Storage を
+//   同居アプリと奪い合う。規則ではなく結果を見る（Day110 と同じ理由）。
+{
+  const O = 'https://egshugy.com'
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public/sw.js'), 'utf8')
+  const CASES = [
+    { label: '自オリジンの成功応答', url: `${O}/icon-192.png`, status: 200, type: 'basic', want: true },
+    { label: '第三者の CORS 応答', url: 'https://www.googletagmanager.com/gtag/js', status: 200, type: 'cors', want: false },
+    { label: '第三者の opaque 応答', url: 'https://static.cloudflareinsights.com/beacon.js', status: 200, type: 'opaque', want: false },
+    { label: '自オリジンの 404', url: `${O}/nope`, status: 404, type: 'basic', want: false },
+    { label: '自オリジンの 500', url: `${O}/boom`, status: 500, type: 'basic', want: false },
+  ]
+  const { written, hasFetch } = await simulateSwCacheWrites(src, { origin: O, cases: CASES })
+  if (!hasFetch) bad('SW書込: fetch ハンドラが無い（書く側の検査が母集団ごと空振りする）')
+  else {
+    // floor: 1件も書かれない実装（＝常に何も保存しない）で「余計なものを保存していない」と
+    // 言っても何も証明していない。まず保存されるべきものが保存されることを見る。
+    const wantedCount = CASES.filter((c) => c.want).length
+    if (written.length > 0 && wantedCount > 0) ok(`SW書込: 母集団 floor（保存されるべき ${wantedCount}件が候補にある）`)
+    else bad('SW書込: floor が成立していない')
+    for (const c of CASES) {
+      const got = written.includes(c.url)
+      if (got === c.want) ok(`SW書込: ${c.label}は${c.want ? '保存する' : '保存しない'}`)
+      else bad(`SW書込: ${c.label}の扱いが想定外（保存=${got} 期待=${c.want}）`)
+    }
+  }
+
+  // 逆向き: 規則を外した版では実際に赤くなる（この検査が空振りしていないことの裏取り）。
+  const loosened = src.replace(/function isCacheable\([^)]*\)\s*\{[\s\S]*?\n\}/, 'function isCacheable() { return true }')
+  if (loosened === src) bad('SW書込: 規則の空振り検知に失敗（isCacheable の形が変わっている）')
+  else {
+    const { written: w2 } = await simulateSwCacheWrites(loosened, { origin: O, cases: CASES })
+    const leaked = CASES.filter((c) => !c.want && w2.includes(c.url))
+    if (leaked.length >= 3) ok(`SW書込: 規則を外すと ${leaked.length}件が保存される（検知が働いている）`)
+    else bad(`SW書込: 規則を外しても差が出ない（検査が空振り）: ${leaked.length}件`)
+  }
 }
 
 console.log(`\n[selftest-check-links] 結果: pass=${pass} fail=${fail}`)
