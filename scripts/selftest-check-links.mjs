@@ -2129,6 +2129,10 @@ export async function generateMetadata() { return { title: 'ゲーム一覧', de
     '}',
   ].join('\n'))
   fs.writeFileSync(path.join(fx, 'app/opengraph-image.tsx'), 'export default function OG() { return null }\n')
+  // ソースルートを名乗るなら public/ の実体も持つ(Day128 PM)。layout の register('/sw.js') は
+  // 「ローカル静的資産の参照」として抽出されるので、実体が無ければ欠落として正しく落ちる
+  // （朝までは実在判定だけが正本の public/ を見ていたため、フィクスチャに無くても素通りしていた）。
+  fs.copyFileSync(path.join(__dirname, '..', 'public/sw.js'), path.join(fx, 'public/sw.js'))
 
   const hits = []
   const server = http.createServer((req, res) => {
@@ -2304,7 +2308,9 @@ export async function generateMetadata() { return { title: 'ゲーム一覧', de
   // (c) sitemap: 同上。フィクスチャの sitemap と実ルートの不整合を捕まえること。
   w('public/sitemap.xml', '<?xml version="1.0" encoding="UTF-8"?>\n<urlset><url><loc>https://egshugy.com/nowhere/</loc></url></urlset>')
   const rMap = runFx()
-  if (rMap.status === 1 && /\[sitemap\]/.test(rMap.stdout)) {
+  // 判定は**フィクスチャ由来の理由**に締める(Day128 PM)。`[sitemap]` だけを見ると、
+  // 別の段が落ちた回でも緑になりうる（テストが別の理由で通る＝何も証明していない状態）。
+  if (rMap.status === 1 && /索引対象の実ルートなのに sitemap に載っていない/.test(rMap.stdout)) {
     ok('抽出層→sitemap: フィクスチャの public/sitemap.xml が読まれる（正本を読み続けない）')
   } else bad(`sitemap に general の口が届いていない: status=${rMap.status}`)
   w('public/sitemap.xml', `<?xml version="1.0" encoding="UTF-8"?>\n<urlset><url><loc>${O}/</loc></url></urlset>`)
@@ -2312,7 +2318,9 @@ export async function generateMetadata() { return { title: 'ゲーム一覧', de
   // (d) robots: 同上。フィクスチャの robots.txt が読まれること。
   w('public/robots.txt', 'User-agent: *\nDisallow: /\n')
   const rRobots = runFx()
-  if (rRobots.status === 1 && /robots/i.test(rRobots.stdout)) {
+  // 「robots」の語は正常出力にも出る。**どのファイルを読んで何に失敗したか**で判定する。
+  if (rRobots.status === 1 && /\[robots\][^\n]*から Sitemap 宣言を1件も抽出できない/.test(rRobots.stdout)
+      && rRobots.stdout.includes(path.basename(fx))) {
     ok('抽出層→robots: フィクスチャの public/robots.txt が読まれる（正本を読み続けない）')
   } else bad(`robots に general の口が届いていない: status=${rRobots.status}`)
   w('public/robots.txt', `User-agent: *\nAllow: /\nSitemap: ${O}/sitemap.xml\n`)
@@ -2329,7 +2337,9 @@ export async function generateMetadata() { return { title: 'ゲーム一覧', de
     '})',
   ].join('\n'))
   const rSw = runFx()
-  if (rSw.status === 1 && /SW実走|後片付け|旧版/.test(rSw.stdout)) {
+  // 3つの語のどれかではなく、**フィクスチャの sw.js を名指しして落ちている**ことを見る。
+  if (rSw.status === 1 && /\[SW実走\]/.test(rSw.stdout) && rSw.stdout.includes(path.basename(fx))
+      && /旧版キャッシュ/.test(rSw.stdout)) {
     ok('抽出層→SW本体: フィクスチャの public/sw.js が読まれる（正本を読み続けない）')
   } else bad(`SW 本体に general の口が届いていない: status=${rSw.status}`)
 
@@ -2337,6 +2347,42 @@ export async function generateMetadata() { return { title: 'ゲーム一覧', de
   const rSpecific = runFx({ LINKS_SW_FILE: path.join(__dirname, '..', 'public/sw.js') })
   if (rSpecific.status === 0) ok('層の順序: specific(LINKS_SW_FILE) が general(LINKS_SRC_DIR) を上書きする')
   else bad(`specific > general が効いていない: status=${rSpecific.status}`)
+
+  // 以降の段は SW を検査対象にしないので、(e) で壊した sw.js を正本の内容へ戻す
+  // （前の段の残骸を残すと、次の段が**別の理由で**赤くなり何を証明したのか読めなくなる）。
+  fs.copyFileSync(path.join(__dirname, '..', 'public/sw.js'), path.join(fx, 'public/sw.js'))
+
+  // (g) ローカル静的資産(Day128 PM で発見): 参照の抽出元は SRC_APP なのに、実在判定だけ
+  //     `path.join(ROOT, 'public', …)` で**正本**を見ていた＝物差しが2つある状態。朝は
+  //     「public/ 配下を見るガード」を数えたつもりで、書き方が違うこの1つを数え落としていた。
+  //     両方向を見る: フィクスチャに在るものは緑（偽赤を出さない）/ 無いものは赤（偽緑にしない）。
+  w('public/fx-only.png', 'PNG')
+  w('app/page.tsx', [
+    'const ALL_CHARACTERS = [{ id: "GMCK", name: "ぶるとら" }]',
+    "export const metadata = { title: 'fx top', description: 'fx',",
+    `  alternates: { canonical: '${O}/' },`,
+    `  openGraph: { url: '${O}/', title: 'fx top', description: 'fx' } }`,
+    'export default function Page() {',
+    '  return (<main><a href="/">home</a><img src="/fx-only.png" alt="fx" />',
+    '    {ALL_CHARACTERS.map((c) => <span key={c.id}>{c.name}</span>)}</main>)',
+    '}',
+  ].join('\n'))
+  const rAssetOk = runFx()
+  if (rAssetOk.status === 0) ok('抽出層→ローカル静的: フィクスチャに実在する資産を「無い」と言わない（偽赤なし）')
+  else bad(`フィクスチャの資産が偽赤: status=${rAssetOk.status} ${rAssetOk.stdout.split('\n').filter((l) => l.includes('✗')).slice(0, 2).join(' / ')}`)
+
+  //     逆向き: **正本にだけ在る**資産（icon-192.png）はフィクスチャでは欠落として捕まること。
+  //     修正前はここが正本の public/ を見て素通りしていた（偽緑）。
+  fs.rmSync(path.join(fx, 'public/fx-only.png'))
+  const rAssetNg = runFx()
+  // この段の致命化は fetch 段（`--list` はその手前で終わる）なので、**名指しの有無**で見る。
+  // 「exit コードが変わらないから何も起きていない」ではなく、どこを見て何と言ったかを判定する。
+  if (/\[ローカル静的\] public\/fx-only\.png が存在しない/.test(rAssetNg.stdout)
+      && !/\[ローカル静的\] public\/fx-only\.png/.test(rAssetOk.stdout)) {
+    ok('抽出層→ローカル静的: フィクスチャに無い資産を欠落として名指しする（正本の public/ で判定しない）')
+  } else bad(`ローカル静的に general の口が届いていない: 欠落時の名指し=${/ローカル静的/.test(rAssetNg.stdout)}`)
+  w('public/fx-only.png', 'PNG')
+
 
   fs.rmSync(fx, { recursive: true, force: true })
 }
@@ -2381,6 +2427,39 @@ export async function generateMetadata() { return { title: 'ゲーム一覧', de
     const leaked = CASES.filter((c) => !c.want && w2.includes(c.url))
     if (leaked.length >= 3) ok(`SW書込: 規則を外すと ${leaked.length}件が保存される（検知が働いている）`)
     else bad(`SW書込: 規則を外しても差が出ない（検査が空振り）: ${leaked.length}件`)
+  }
+}
+
+// 65 層の取り残しを**数で**塞ぐ(Day128 PM)。
+//   今日は同じ形を2回踏んだ: 朝に4つのガードが `ROOT` 直書きのまま取り残されているのを直し、
+//   夕方に**5つ目**（ローカル静的資産の実在判定）を見つけた。5つ目を数え落とした理由は
+//   `path.join(ROOT, 'public', p)` という**他とは違う書き方**だったこと——「使っている箇所が
+//   正しい」ことの確認では、取り残しは永久に見えない。以後は個別に数えず、規則として禁じる。
+//   表示用の `path.relative(ROOT, …)` と `SRC_ROOT` の定義/比較は対象外（読み取りではない）。
+{
+  const srcPath = path.join(__dirname, 'check-links.mjs')
+  const src = fs.readFileSync(srcPath, 'utf8')
+  // コメント行は対象外（この規則を説明する文そのものが違反として拾われる＝実際に踏んだ）。
+  const detect = (code) => code.split('\n')
+    .map((line, i) => ({ n: i + 1, line }))
+    .filter(({ line }) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+    .filter(({ line }) => /path\.join\(\s*ROOT\s*,/.test(line))
+  // 先に検知が働くことを確かめる（空振りしている検査の「0件」は無意味）。
+  const probe = detect("const x = fs.existsSync(path.join(ROOT, 'public', p))")
+  if (probe.length === 1) ok('層の floor: 検知が働いている（ROOT 直書きの読み取りを拾う）')
+  else bad('層の floor が空振りしている')
+  const probeOk = detect([
+    'console.log(path.relative(ROOT, SW_FILE))',
+    'const SRC_ROOT = env ? path.resolve(env) : ROOT',
+    "// 以前は path.join(ROOT, 'public', p) だった、という説明文",
+  ].join('\n'))
+  if (probeOk.length === 0) ok('層の floor: 表示用の path.relative・SRC_ROOT の定義・コメントは拾わない（偽陽性なし）')
+  else bad(`層の floor が違反でないものを拾っている: ${probeOk.map((o) => `L${o.n}`).join(' ')}`)
+  const offenders = detect(src)
+  if (offenders.length === 0) {
+    ok('層の floor: check-links.mjs に ROOT 直書きの読み取りが0件（全ガードが抽出層の口に載っている）')
+  } else {
+    bad(`抽出層の口に載っていない読み取りが残っている: ${offenders.map((o) => `L${o.n}`).join(' ')}`)
   }
 }
 

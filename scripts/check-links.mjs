@@ -249,7 +249,13 @@ function scanLocalAssetRefs() {
   return [...refs]
 }
 const localImageRefs = scanLocalAssetRefs()
-const localMissing = localImageRefs.filter((p) => !fs.existsSync(path.join(ROOT, 'public', p)))
+// 参照の抽出元は SRC_APP なのに、実在判定だけ正本の public/ を見ていた(Day128 PM で発見)。
+// 朝の修正は「public/ 配下を見るガード」を4つ数えて SRC 起点へ揃えたが、**この1つを数え落として
+// いた**——`path.join(ROOT, 'public', …)` という他とは違う書き方だったため。実測: フィクスチャに
+// 実在する `/fx-only.png` は「存在しない」と赤くなり(偽赤)、フィクスチャに無い `/icon-192.png` は
+// 正本に在るので素通りする(偽緑)。**片方が正本・片方がフィクスチャ**という、朝に潰したのと
+// 同じ「物差しが2つある」形が1箇所だけ残っていた。
+const localMissing = localImageRefs.filter((p) => !fs.existsSync(path.join(SRC_PUBLIC, p)))
 for (const p of localMissing) console.log(`  ✗ MISSING  [ローカル静的] public${p} が存在しない(メタ/JSX が参照・共有カード等が404になる)`)
 
 // --- canonical / og:url の自己参照ずれ(PM Day97) ---
@@ -448,7 +454,9 @@ if (a11yOffenders.length > 0) {
   // 同居する子アプリのキャッシュ名。版番号は判定に無関係(接頭辞が別であることだけが本質)
   // なので固定値にして、子アプリ側の版上げでこの検査が腐らないようにする。
   const FOREIGN_KEYS = ['egtype-', 'pekarin-chinchiro-', 'word-wolf-', 'kingscup-'].map((p) => `${p}vX`)
-  const sim = await simulateSwActivate(fs.readFileSync(SW_FILE, 'utf8'), { origin: selfOrigin, foreignKeys: FOREIGN_KEYS })
+  // 同じファイルを2度読まない（activate と書込の実走で同じソースを使うことを形で示す）
+  const swSource = fs.readFileSync(SW_FILE, 'utf8')
+  const sim = await simulateSwActivate(swSource, { origin: selfOrigin, foreignKeys: FOREIGN_KEYS })
   const swFatal = []
   // 母集団/前提の floor。どれも「検査が空振りしているのに緑」を作る経路。
   if (!sim.hasActivate) swFatal.push('activate ハンドラが無い（後片付けの検査が母集団ごと空振りする）')
@@ -475,7 +483,7 @@ if (a11yOffenders.length > 0) {
     { label: '第三者の opaque 応答', url: 'https://static.cloudflareinsights.com/beacon.js', status: 200, type: 'opaque', want: false },
     { label: '自オリジンの 404', url: `${selfOrigin}/nope`, status: 404, type: 'basic', want: false },
   ]
-  const writes = await simulateSwCacheWrites(fs.readFileSync(SW_FILE, 'utf8'), { origin: selfOrigin, cases: WRITE_CASES })
+  const writes = await simulateSwCacheWrites(swSource, { origin: selfOrigin, cases: WRITE_CASES })
   for (const c of WRITE_CASES) {
     const got = writes.written.includes(c.url)
     if (got === c.want) continue
