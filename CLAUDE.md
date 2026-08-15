@@ -37,6 +37,9 @@
 - `npm run check` … 型 + 監視系セルフテスト + egtype 整合を**まとめて**実行（これが日々の検証の入口）
 - `npm run typecheck` … `tsc --noEmit`（実測: app/components など **161 ファイル**を検査する）
 - `node scripts/selftest-check-links.mjs` … 死活監視 check-links の抽出・振り分け・配線（**フィクスチャで完結**。`LINKS_SRC_DIR` を使い実在ドメインは叩かない）
+  - この「叩かない」は Day131 まで**名乗りだけ**だった（実走 spawn 7箇所のうち4箇所が正本の app/ を読み、1回につき外部11件を叩いていた）。
+    現在は末尾の自己floor が「HTTP を打つ spawn は全数が口を渡す」「フィクスチャの監視対象は全てローカル」を規則として固定している。
+    実測: ネットワークを遮断して走らせても pass 全件・約28秒で終わる（遮断前の旧実装は fail=3・352秒）。配線テストを足すときは口を渡すこと。
 - `node scripts/check-links.mjs` … 本番への実走（外部ドメインを実際に叩く。cron/GitHub Actions もこれ）
 - **`npm run lint` は無い**（2026-08-15 に削除）。eslint はこのリポの依存に**一度も入っていなかった**ため、
   `"lint": "eslint ."` は実行すると `eslint: not found` で落ちるだけの空手形だった。

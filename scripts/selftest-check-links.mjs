@@ -1,5 +1,12 @@
-// fetch-with-retry.mjs のセルフテスト（実ネットワーク不要・決定的）。
+// fetch-with-retry.mjs / check-links.mjs のセルフテスト（実ネットワーク不要・決定的）。
 // 使い方: node scripts/selftest-check-links.mjs   → 最後に PASS/FAIL を出す
+//
+// ⚠ この「実ネットワーク不要」は **Day131 で本当になった**。それまでは名乗りだけで、
+// check-links を実走させる7箇所のうち4箇所が正本の app/ を読み、1回の spawn につき
+// 外部11件（x.com / tiktok / instagram / store.line.me / *.vercel.app / gtag / egshugy.com）を
+// 実際に叩いていた。実測: ネットワークを遮断して走らせると旧実装は **pass=218 fail=3・352秒**、
+// 現在は **pass=225 fail=0・28秒**。この性質は末尾の自己floor（口を渡さない実走 spawn が0件・
+// フィクスチャの監視対象は全てローカル）で規則として固定してある。
 //
 // 狙い(Day85): check-links の死活監視が一時失敗(タイムアウト/瞬断/5xx/429)を単発で
 // 「致命」誤警報にしていた false-red を、リトライで吸収する挙動として固定する。
@@ -40,6 +47,89 @@ let pass = 0, fail = 0
 const ok = (m) => { pass++; console.log('  ✓', m) }
 const bad = (m) => { fail++; console.log('  ✗', m) }
 const noSleep = () => Promise.resolve()  // テストは実際に待たない
+
+const REPO_ROOT = path.join(__dirname, '..')
+
+// 配線テスト（check-links.mjs を子プロセスで実走させる段）が読む「ソースのフィクスチャ」を書く（Day131）。
+//
+// Day125 は抽出層に `LINKS_SRC_DIR` の口を作り、「外へ一歩も出ずに全段を踏める」ことを実証した——
+// が、**その口を使ったのは Day125 自身の1段だけ**で、先に書かれた Day113/Day116/Day119 と接続段の
+// 4つの spawn は正本の app/ を読み続けていた。結果、このファイルは冒頭で「実ネットワーク不要・決定的」と
+// 名乗りながら、1回の実行で x.com / tiktok / instagram / store.line.me / vercel / googletagmanager /
+// egshugy.com を**実際に叩いていた**（実測: 1回の spawn につき外部11件）。各段のコメントには
+// 「実在の外部が落ちた回に本題と無関係で赤くなる」旨が Day113(d)・Day116・Day119・Day123PM と
+// 4度書き残されており、そのたびに**判定を緩める**（status ではなく名指しで見る・3回まで再試行する）
+// 方向で回避されていた。回避ではなく口を渡して塞ぐ。
+//
+// origin は**そのテストのローカルサーバ自身**にする。canonical/og:url・metadataBase・robots の
+// Sitemap 申告は絶対URLで書かれ、`--base` の置換対象にもならない（実測: 正本を読ませると
+// https://egshugy.com が3件そのまま監視対象に載る）。origin をローカルにすれば、その3件も
+// ローカルサーバへ向く＝外部への流出が本当に0になる。
+function writeSrcFixture(fx, origin, { routes = ['stamps'], chars = ['GMCK'] } = {}) {
+  const write = (rel, src) => {
+    const full = path.join(fx, rel)
+    fs.mkdirSync(path.dirname(full), { recursive: true })
+    fs.writeFileSync(full, src)
+    return full
+  }
+  // 各ルートは自前の title/description と canonical/og:url を持つ（索引ガード・自己URLガードが
+  // 「レイアウト既定を名乗る」「別ルートを宣言している」で落ちないようにする＝既定は全段緑）。
+  const pageSrc = (route, title, body) => [
+    `export const metadata = { title: '${title}', description: '${title} の説明',`,
+    `  alternates: { canonical: '${origin}${route}' },`,
+    `  openGraph: { url: '${origin}${route}', title: '${title}', description: '${title} の説明' } }`,
+    'export default function Page() {',
+    `  return (<main>${body}</main>)`,
+    '}',
+  ].join('\n')
+  const nav = ['<a href="/">home</a>', ...routes.map((r) => `<a href="/${r}/">${r}</a>`)].join('')
+  write('app/layout.tsx', [
+    `export const metadata = { metadataBase: new URL('${origin}'), title: 'fx', description: 'fx' }`,
+    'export default function RootLayout({ children }) {',
+    '  return (<html><body>{children}',
+    "    <script dangerouslySetInnerHTML={{ __html: `if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js')}` }} />",
+    '  </body></html>)',
+    '}',
+  ].join('\n'))
+  write('app/page.tsx', [
+    `const ALL_CHARACTERS = [${chars.map((c) => `{ id: "${c}", name: "${c}" }`).join(', ')}]`,
+    pageSrc('/', 'fx top', `${nav}{ALL_CHARACTERS.map((c) => <span key={c.id}>{c.name}</span>)}`),
+  ].join('\n'))
+  for (const r of routes) write(`app/${r}/page.tsx`, pageSrc(`/${r}/`, `fx ${r}`, nav))
+  // OG ルートもフィクスチャが持つ。件数（分母）を正本の都合ではなく**このフィクスチャが決める**
+  // ようにして、テスト側がリテラルの 4 を書かなくて済むようにする。
+  const ogFiles = ['app/opengraph-image.tsx', 'app/twitter-image.tsx', ...routes.map((r) => `app/${r}/opengraph-image.tsx`)]
+  for (const f of ogFiles) write(f, 'export default function OG() { return null }\n')
+  const publicDir = path.join(fx, 'public')
+  fs.mkdirSync(publicDir, { recursive: true })
+  // ソースルートを名乗るなら public/ の実体も持つ（Day128 PM）。layout の register('/sw.js') は
+  // ローカル静的資産の参照として抽出されるため、実体が無ければ正しく欠落と言われる。
+  fs.copyFileSync(path.join(REPO_ROOT, 'public/sw.js'), path.join(publicDir, 'sw.js'))
+  const locs = [`${origin}/`, ...routes.map((r) => `${origin}/${r}/`)]
+  const sitemapXml = (l = locs) =>
+    `<?xml version="1.0" encoding="UTF-8"?>\n<urlset>${l.map((u) => `<url><loc>${u}</loc></url>`).join('')}</urlset>`
+  const robotsTxt = `User-agent: *\nAllow: /\nSitemap: ${origin}/sitemap.xml\n`
+  write('public/sitemap.xml', sitemapXml())
+  const robotsPath = write('robots.txt', robotsTxt)
+  return {
+    locs,
+    ogCount: ogFiles.length,
+    sitemapXml,
+    robotsTxt,
+    robotsPath,
+    publicDir,
+    write,
+    // SW 本体（母集団も実体も）はこの段の検査対象ではないので正本を見せる＝Day125 と同じ
+    // 「specific > general」の使い方。読むだけでネットワークには出ない。
+    env: {
+      LINKS_SRC_DIR: fx,
+      LINKS_SW_DIR: path.join(REPO_ROOT, 'app'),
+      LINKS_SW_FILE: path.join(REPO_ROOT, 'public/sw.js'),
+      LINKS_ROBOTS: robotsPath,
+      LINKS_PUBLIC_DIR: publicDir,
+    },
+  }
+}
 
 // n 回だけ失敗し、その後 200 を返す mock fetch。
 //   mode='throw' → ネットワークエラー(catch されて status:0 相当)
@@ -1279,20 +1369,9 @@ self.addEventListener('fetch', (event) => {
 //   永久に緑）。ローカルの HTTP サーバを立てて `--base` で向け、実際の fetch 段を通して固定する。
 {
   const fx = fs.mkdtempSync(path.join(os.tmpdir(), 'links-d113-'))
-  const write = (rel, src) => {
-    const full = path.join(fx, rel)
-    fs.mkdirSync(path.dirname(full), { recursive: true })
-    fs.writeFileSync(full, src)
-    return full
-  }
-  const O = 'https://egshugy.com'  // 正本 app/layout.tsx の metadataBase（申告はこの origin で書く）
-  const REPO_LOCS = [`${O}/`, `${O}/stamps/`]
-  const sitemapXml = (locs) =>
-    `<?xml version="1.0" encoding="UTF-8"?>\n<urlset>${locs.map((u) => `<url><loc>${u}</loc></url>`).join('')}</urlset>`
-  const robotsTxt = `User-agent: *\nAllow: /\nSitemap: ${O}/sitemap.xml\n`
-  const publicDir = path.join(fx, 'public')
-  fs.mkdirSync(publicDir, { recursive: true })
-  fs.writeFileSync(path.join(publicDir, 'sitemap.xml'), sitemapXml(REPO_LOCS))
+  // ソースは正本ではなくフィクスチャを見せる（Day131）。従来はここだけ口が無く、
+  // 正本の app/ から実在の外部ドメインを拾って本当に叩いていた。
+  let O = null, REPO_LOCS = null, sitemapXml = null, robotsTxt = null, publicDir = null, write = null, fxEnv = null
 
   // 配信側の応答を差し替えられるローカルサーバ。既定は「全部 200・正常」で、
   // 検査したい1本だけを壊す（他の段の失敗が混ざると、何を証明したのか読めなくなるため）。
@@ -1319,12 +1398,15 @@ self.addEventListener('fetch', (event) => {
   })
   await new Promise((r) => server.listen(0, '127.0.0.1', r))
   const BASE = `http://127.0.0.1:${server.address().port}`
+  // 申告 origin をこのサーバ自身にしてフィクスチャを書く（絶対URLの宣言まで外へ出さない）
+  O = BASE
+  ;({ sitemapXml, robotsTxt, publicDir, write, env: fxEnv, locs: REPO_LOCS } = writeSrcFixture(fx, O))
   // **spawnSync は使えない**: 同期 spawn はイベントループを止めるので、同じプロセスで動く
   // このローカルサーバが応答できず、check-links 側の fetch が待ち続ける（実際に最初そうなった）。
   // 非同期 spawn にして、子プロセスの実行中もサーバが応答できるようにする。
   const run = (env = {}) => new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--base', BASE],
-      { env: { ...process.env, LINKS_ROBOTS: write('robots.txt', robotsTxt), LINKS_PUBLIC_DIR: publicDir, ...env } })
+      { env: { ...process.env, ...fxEnv, ...env } })
     let stdout = ''
     child.stdout.on('data', (d) => { stdout += d })
     child.stderr.on('data', (d) => { stdout += d })
@@ -1400,15 +1482,9 @@ self.addEventListener('fetch', (event) => {
 //   人間ゲートのデプロイ待ちで毎日 red になり検査ごと捨てられる。
 {
   const fx = fs.mkdtempSync(path.join(os.tmpdir(), 'links-d116-'))
-  const O = 'https://egshugy.com'  // 正本 app/layout.tsx の metadataBase
-  const sitemapXml = (locs) =>
-    `<?xml version="1.0" encoding="UTF-8"?>\n<urlset>${locs.map((u) => `<url><loc>${u}</loc></url>`).join('')}</urlset>`
-  const robotsTxt = `User-agent: *\nAllow: /\nSitemap: ${O}/sitemap.xml\n`
-  const robotsPath = path.join(fx, 'robots.txt')
-  fs.writeFileSync(robotsPath, robotsTxt)
-  const publicDir = path.join(fx, 'public')
-  fs.mkdirSync(publicDir, { recursive: true })
-  fs.writeFileSync(path.join(publicDir, 'sitemap.xml'), sitemapXml([`${O}/`, `${O}/stamps/`]))
+  // ソースは正本ではなくフィクスチャを見せる（Day131・writeSrcFixture の説明を参照）。
+  let O = null, sitemapXml = null, robotsTxt = null, robotsPath = null, publicDir = null, fxEnv = null
+  let OG_TOTAL = null   // OG ルートの分母はフィクスチャが決める（正本の件数に依存しない）
 
   // 既定は「全部正常」。OG も image/png で返し、検査したい1本だけを差し替える
   // （他の段が同時に落ちると、exit 1 が何の理由で立ったのか読めなくなる）。
@@ -1428,10 +1504,12 @@ self.addEventListener('fetch', (event) => {
   })
   await new Promise((r) => server.listen(0, '127.0.0.1', r))
   const BASE = `http://127.0.0.1:${server.address().port}`
+  O = BASE
+  ;({ sitemapXml, robotsTxt, robotsPath, publicDir, env: fxEnv, ogCount: OG_TOTAL } = writeSrcFixture(fx, O))
   // spawnSync だとイベントループが止まり同一プロセスのこのサーバが応答できない(Day113 と同じ)
   const run = () => new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--base', BASE],
-      { env: { ...process.env, LINKS_ROBOTS: robotsPath, LINKS_PUBLIC_DIR: publicDir } })
+      { env: { ...process.env, ...fxEnv } })
     let stdout = ''
     child.stdout.on('data', (d) => { stdout += d })
     child.stderr.on('data', (d) => { stdout += d })
@@ -1452,8 +1530,8 @@ self.addEventListener('fetch', (event) => {
   // の2点で見る。
   const ogSummary = rOk.stdout.match(/OG配信 (\d+)\/(\d+)件が image\/\*/)
   const ogSilent = !/\[OG配信\]/.test(rOk.stdout) && !/ⓘ OG配信/.test(rOk.stdout)
-  if (ogSilent && (!ogSummary || (ogSummary[1] === '4' && ogSummary[2] === '4'))) {
-    ok('配線: OG が image/* で配信されていれば何も言わず、数えるときは 4/4 と報告する(偽陽性なし)')
+  if (ogSilent && ogSummary && Number(ogSummary[1]) === OG_TOTAL && Number(ogSummary[2]) === OG_TOTAL) {
+    ok(`配線: OG が image/* で配信されていれば何も言わず、数えるときは ${OG_TOTAL}/${OG_TOTAL} と報告する(偽陽性なし)`)
   } else bad(`正常な OG 配信で誤検知/計上漏れ: silent=${ogSilent} summary=${ogSummary?.[0] ?? '(出ず)'}`)
 
   // (b) 200 だが HTML＝Day104 が直した欠陥そのもの（中身が画像でないのに 200 なので res.ok では見えない）。
@@ -1474,14 +1552,14 @@ self.addEventListener('fetch', (event) => {
   // (d) 404＝本番未反映。人間ゲートのデプロイ待ちで red にしない（致命の理由に挙がらない）。
   serve = { [OG_UNDER_TEST]: { status: 404, body: 'not found' } }
   const rPending = await run()
-  const pendingNoted = /ⓘ OG配信 1\/4 件が本番未反映\(404\)/.test(rPending.stdout)
+  const pendingNoted = new RegExp(`ⓘ OG配信 1/${OG_TOTAL} 件が本番未反映\\(404\\)`).test(rPending.stdout)
   // 「ok の実数を偽らない」は**否定形**で見る。`OG配信 n/4件が image/*` のサマリ行は非致命の
   // 経路でしか出ないため、`3/4 が出ること`を要求すると外部ドメイン(gtag 等)の一時失敗で
   // 致命側へ落ちた回に、本題と無関係な理由でこのケースだけが赤くなる(実際に一度そうなった)。
   // 出るか出ないかに関わらず成り立つ「4/4 とは名乗らない」を固定する。
-  const claimsAllOk = /OG配信 4\/4件が image\/\*/.test(rPending.stdout)
+  const claimsAllOk = new RegExp(`OG配信 ${OG_TOTAL}/${OG_TOTAL}件が image/\\*`).test(rPending.stdout)
   if (pendingNoted && !ogBlamed(rPending.stdout) && !claimsAllOk) {
-    ok('配線: 未反映(404)は警告に留まり致命の理由にならず、サマリも 4/4 とは名乗らない')
+    ok(`配線: 未反映(404)は警告に留まり致命の理由にならず、サマリも ${OG_TOTAL}/${OG_TOTAL} とは名乗らない`)
   } else bad(`未反映の扱いが想定外: pending=${pendingNoted} blamed=${ogBlamed(rPending.stdout)} claims4/4=${claimsAllOk}`)
 
   // (e) 5xx＝瞬断。恒久欠陥と混ぜない（リトライ後も 5xx なら警告のみ）。
@@ -1630,15 +1708,8 @@ self.addEventListener('fetch', (event) => {
 //   本体の反応を固定する（他の段は正常にしておく＝exit の理由が読めなくなるため）。
 {
   const fx = fs.mkdtempSync(path.join(os.tmpdir(), 'links-d119-'))
-  const O = 'https://egshugy.com'  // 正本 app/layout.tsx の metadataBase
-  const sitemapXml = (locs) =>
-    `<?xml version="1.0" encoding="UTF-8"?>\n<urlset>${locs.map((u) => `<url><loc>${u}</loc></url>`).join('')}</urlset>`
-  const robotsTxt = `User-agent: *\nAllow: /\nSitemap: ${O}/sitemap.xml\n`
-  const robotsPath = path.join(fx, 'robots.txt')
-  fs.writeFileSync(robotsPath, robotsTxt)
-  const publicDir = path.join(fx, 'public')
-  fs.mkdirSync(publicDir, { recursive: true })
-  fs.writeFileSync(path.join(publicDir, 'sitemap.xml'), sitemapXml([`${O}/`, `${O}/stamps/`]))
+  // ソースは正本ではなくフィクスチャを見せる（Day131・writeSrcFixture の説明を参照）。
+  let O = null, sitemapXml = null, robotsTxt = null, robotsPath = null, publicDir = null, fxEnv = null
 
   // 既定は全部正常。検査したい1本だけを差し替える。
   let serve = {}
@@ -1658,9 +1729,11 @@ self.addEventListener('fetch', (event) => {
   })
   await new Promise((r) => server.listen(0, '127.0.0.1', r))
   const BASE = `http://127.0.0.1:${server.address().port}`
+  O = BASE
+  ;({ sitemapXml, robotsTxt, robotsPath, publicDir, env: fxEnv } = writeSrcFixture(fx, O))
   const run = (args = []) => new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--base', BASE, ...args],
-      { env: { ...process.env, LINKS_ROBOTS: robotsPath, LINKS_PUBLIC_DIR: publicDir } })
+      { env: { ...process.env, ...fxEnv } })
     let stdout = ''
     child.stdout.on('data', (d) => { stdout += d })
     child.stderr.on('data', (d) => { stdout += d })
@@ -1979,15 +2052,12 @@ export async function generateMetadata() { return { title: 'ゲーム一覧', de
 //   ローカルサーバ＋`--base` のハーネスで、**接続を切る**応答（socket destroy）を使って固定する。
 {
   const fx = fs.mkdtempSync(path.join(os.tmpdir(), 'links-d122-'))
-  const O = 'https://egshugy.com'
-  const sitemapXml = (locs) =>
-    `<?xml version="1.0" encoding="UTF-8"?>\n<urlset>${locs.map((u) => `<url><loc>${u}</loc></url>`).join('')}</urlset>`
-  const robotsTxt = `User-agent: *\nAllow: /\nSitemap: ${O}/sitemap.xml\n`
-  const robotsPath = path.join(fx, 'robots.txt')
-  fs.writeFileSync(robotsPath, robotsTxt)
-  const publicDir = path.join(fx, 'public')
-  fs.mkdirSync(publicDir, { recursive: true })
-  fs.writeFileSync(path.join(publicDir, 'sitemap.xml'), sitemapXml([`${O}/`, `${O}/stamps/`]))
+  // ソースは正本ではなくフィクスチャを見せる（Day131・writeSrcFixture の説明を参照）。
+  // この段は「接続段の診断」が主題で、**実行環境の回線が生きていること**を前提にしていた
+  // ——正本の app/ を読むと実在の外部（x.com 等）を叩き、そこが細ると診断が
+  // 「こちらの回線」に倒れて本題を測れなくなるため。口を渡した今は外へ出ないので、
+  // 前提そのものが消える（下の 3 回まで再試行する保険も、原理的に空振りしなくなる）。
+  let O = null, sitemapXml = null, robotsTxt = null, robotsPath = null, publicDir = null, fxEnv = null
 
   // 接続を切る（fetch は例外＝status 0 になる）。
   //   dropAlways … ずっと切る（恒常的に届かない相手）
@@ -2022,9 +2092,11 @@ export async function generateMetadata() { return { title: 'ゲーム一覧', de
   })
   await new Promise((r) => server.listen(0, '127.0.0.1', r))
   const BASE = `http://127.0.0.1:${server.address().port}`
+  O = BASE
+  ;({ sitemapXml, robotsTxt, robotsPath, publicDir, env: fxEnv } = writeSrcFixture(fx, O))
   const run = () => new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--base', BASE],
-      { env: { ...process.env, LINKS_ROBOTS: robotsPath, LINKS_PUBLIC_DIR: publicDir, LINKS_RECHECK_DELAY_MS: '8000' } })
+      { env: { ...process.env, ...fxEnv, LINKS_RECHECK_DELAY_MS: '8000' } })
     let stdout = ''
     child.stdout.on('data', (d) => { stdout += d })
     child.stderr.on('data', (d) => { stdout += d })
@@ -2050,18 +2122,15 @@ export async function generateMetadata() { return { title: 'ゲーム一覧', de
   // (b) 本題。**1回目だけ**接続を切られた1本（＝瞬断そのもの）。
   //     修正前は fetchWithRetry の3試行(計1.2秒)を使い切って hardBad＝「✗ 致命」で exit 1 だった。
   //     ここでは再確認で回復し、緑のまま、しかも**黙って緑にせず**回復を名乗ること。
-  //     このケースだけは**実行環境の回線が生きていること**を前提にする（回線が細っていれば
-  //     診断は「こちらの回線」になり、それはその環境における正しい答え＝本題を測れない）。
-  //     測れない回は黙って緑にせず、環境が復するまで数回だけやり直し、駄目なら赤で報告する。
-  let rFlaky = null
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    dropAlways = new Set(); dropWindow = { path: TARGET, since: null }
-    const r = await run()
-    if (!blamedLocalNet(r.stdout)) { rFlaky = r; break }
-    console.log(`    (実行環境の回線が不通と診断されたため測り直す ${attempt}/3)`)
-  }
-  if (rFlaky === null) {
-    bad('瞬断のケースを測れなかった（実行環境の回線が3回とも不通と診断された＝環境側の問題）')
+  //     従来はここだけ**実行環境の回線が生きていること**を前提にし、「こちらの回線」と診断された
+  //     回は最大3回まで測り直していた（正本の app/ を読んで実在の外部を叩いていたため）。
+  //     Day131 で口を渡し、監視対象がフィクスチャのローカルサーバだけになったので前提は消えた。
+  //     測り直しは floor へ格上げする: ここで「こちらの回線」が出たら、それは環境の問題ではなく
+  //     **どこかから外へ出ている**という報せなので、黙って測り直さずに赤で名指しする。
+  dropAlways = new Set(); dropWindow = { path: TARGET, since: null }
+  const rFlaky = await run()
+  if (blamedLocalNet(rFlaky.stdout)) {
+    bad(`瞬断の回で「こちらの回線」と診断された＝監視対象に外部が混じっている（フィクスチャは全てローカルのはず）`)
   } else {
     // 件数(`1件`)ではなく **このフィクスチャの URL が回復として名指しされたか** で見る(Day123 PM)。
     // 朝の実装は `接続不能だった 1件は …` と件数を焼き込んでおり、**実行環境の回線が細って
@@ -2091,9 +2160,9 @@ export async function generateMetadata() { return { title: 'ゲーム一覧', de
   const rDown = await run()
   const named = new RegExp(`✗ [^\\n]*\\s${BASE}${TARGET}`).test(rDown.stdout)
   const claimsAllOk = /✓ 全\d+件 OK/.test(rDown.stdout)
-  if (named && !claimsAllOk) {
-    ok('配線: ずっと接続できない相手は再確認でも回復せず、URL を名指しして緑にしない')
-  } else bad(`恒常的な不通の扱いが想定外: 名指し=${named} 全件OK=${claimsAllOk}`)
+  if (named && !claimsAllOk && !blamedLocalNet(rDown.stdout)) {
+    ok('配線: ずっと接続できない相手は再確認でも回復せず、URL を名指しして緑にしない(かつ「こちらの回線」とは診断しない)')
+  } else bad(`恒常的な不通の扱いが想定外: 名指し=${named} 全件OK=${claimsAllOk} 回線と診断=${blamedLocalNet(rDown.stdout)}`)
 
   server.closeAllConnections?.()
   server.close()
@@ -2115,19 +2184,25 @@ export async function generateMetadata() { return { title: 'ゲーム一覧', de
   const fx = fs.mkdtempSync(path.join(os.tmpdir(), 'links-d125-'))
   fs.mkdirSync(path.join(fx, 'app'), { recursive: true })
   fs.mkdirSync(path.join(fx, 'public'), { recursive: true })
-  const O = 'https://egshugy.com'
-  fs.writeFileSync(path.join(fx, 'robots.txt'), `User-agent: *\nAllow: /\nSitemap: ${O}/sitemap.xml\n`)
-  fs.writeFileSync(path.join(fx, 'public/sitemap.xml'),
-    `<?xml version="1.0" encoding="UTF-8"?>\n<urlset><url><loc>${O}/</loc></url></urlset>`)
-  fs.writeFileSync(path.join(fx, 'app/layout.tsx'), [
-    `export const metadata = { metadataBase: new URL('${O}'), title: 'fx', description: 'fx' }`,
-    'export default function RootLayout({ children }) {',
-    '  return (<html><body>{children}',
-    // SW ブートストラップの母集団 floor を満たす最小形（登録だけ・巻き添えなし）
-    "    <script dangerouslySetInnerHTML={{ __html: `if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js')}` }} />",
-    '  </body></html>)',
-    '}',
-  ].join('\n'))
+  // 申告 origin は**このフィクスチャのサーバ自身**にする（Day131）。実在ドメインを名乗ると、
+  // canonical / og:url / metadataBase / robots の Sitemap 申告は `--base` の置換対象ではないため
+  // **その3件だけが本物の egshugy.com へ出ていく**（実測: ネットワークを遮断すると、この段だけが
+  // 「外部が全件判定不能」で落ちた＝Day125 が閉じたはずの外へ、宣言の側から漏れていた）。
+  let O = null
+  const writeOriginFiles = () => {
+    fs.writeFileSync(path.join(fx, 'robots.txt'), `User-agent: *\nAllow: /\nSitemap: ${O}/sitemap.xml\n`)
+    fs.writeFileSync(path.join(fx, 'public/sitemap.xml'),
+      `<?xml version="1.0" encoding="UTF-8"?>\n<urlset><url><loc>${O}/</loc></url></urlset>`)
+    fs.writeFileSync(path.join(fx, 'app/layout.tsx'), [
+      `export const metadata = { metadataBase: new URL('${O}'), title: 'fx', description: 'fx' }`,
+      'export default function RootLayout({ children }) {',
+      '  return (<html><body>{children}',
+      // SW ブートストラップの母集団 floor を満たす最小形（登録だけ・巻き添えなし）
+      "    <script dangerouslySetInnerHTML={{ __html: `if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js')}` }} />",
+      '  </body></html>)',
+      '}',
+    ].join('\n'))
+  }
   fs.writeFileSync(path.join(fx, 'app/opengraph-image.tsx'), 'export default function OG() { return null }\n')
   // ソースルートを名乗るなら public/ の実体も持つ(Day128 PM)。layout の register('/sw.js') は
   // 「ローカル静的資産の参照」として抽出されるので、実体が無ければ欠落として正しく落ちる
@@ -2147,6 +2222,8 @@ export async function generateMetadata() { return { title: 'ゲーム一覧', de
   await new Promise((r) => server.listen(0, '127.0.0.1', r))
   const PORT = server.address().port
   const BASE = `http://127.0.0.1:${PORT}`
+  O = BASE
+  writeOriginFiles()
 
   // 外部リンクは**平文 http でフィクスチャのサーバを指す**。これは Day116 起票の
   // 「https:// 限定」を解いたからこそ書ける形で、逆に言えば従来はローカルに閉じた
@@ -2461,6 +2538,80 @@ export async function generateMetadata() { return { title: 'ゲーム一覧', de
   } else {
     bad(`抽出層の口に載っていない読み取りが残っている: ${offenders.map((o) => `L${o.n}`).join(' ')}`)
   }
+}
+
+// 65 floor(Day131): **配線テスト自身**が外へ出ないことを規則にする。
+//
+// このファイルは冒頭で「実ネットワーク不要・決定的」と名乗っているが、実測ではそうではなかった:
+// check-links を実走させる spawn は6箇所あり、抽出層の口(`LINKS_SRC_DIR`)を渡していたのは
+// Day125 が足した3箇所だけ。残りは正本の app/ を読み、1回の spawn につき
+// x.com / tiktok / instagram / store.line.me / *.vercel.app / googletagmanager / egshugy.com の
+// **外部11件**を本当に叩いていた。各段のコメントには「実在の外部が落ちた回に本題と無関係で
+// 赤くなる」が Day113(d)・Day116・Day119・Day123PM と4度書き残されており、そのつど
+// **判定を緩める**方向で回避されている（名指しで見る／3回まで測り直す）。
+// 数えるのをやめて規則にする——新しい配線テストを書いた日に、口を渡し忘れたら落ちる。
+{
+  const selfSrc = fs.readFileSync(path.join(__dirname, 'selftest-check-links.mjs'), 'utf8')
+  /** check-links を子プロセスで実走させている箇所と、その呼び出しが渡す env の断片 */
+  const spawnSites = (src) => {
+    const out = []
+    const re = /spawn(?:Sync)?\(process\.execPath, \[[^\]]*check-links\.mjs[^\]]*\]/g
+    let m
+    while ((m = re.exec(src)) !== null) {
+      const n = src.slice(0, m.index).split('\n').length
+      // 呼び出しの env は直後の引数オブジェクトに書かれる。実装差（同じ行 / 次の行 / 変数渡し）を
+      // 吸収するため、呼び出し直後の一定範囲を「その呼び出しの env 記述」とみなす。
+      // `--list` は監視対象を**列挙するだけ**で HTTP を打たない＝外へ出ないので、口の要否では分けて数える。
+      out.push({ n, listOnly: /--list/.test(m[0]), env: src.slice(m.index + m[0].length, m.index + m[0].length + 400) })
+    }
+    return out
+  }
+  /** 抽出層の口を渡しているか（直接指定 / フィクスチャの env 束をまとめて渡す形の両方を許す） */
+  const passesSeam = (env) => /LINKS_SRC_DIR|fxEnv|fxSrcEnv/.test(env)
+
+  // 検知規則そのものの固定（ここが腐ると以下は無言化する）
+  const probeBad = spawnSites("const c = spawn(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--base', B], { env: { ...process.env, LINKS_ROBOTS: r } })")
+  const probeOk = spawnSites("const c = spawn(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--base', B], { env: { ...process.env, LINKS_SRC_DIR: fx } })")
+  const probeList = spawnSites("const r = spawnSync(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--list'], { encoding: 'utf8' })")
+  if (probeBad.length === 1 && !passesSeam(probeBad[0].env) && !probeBad[0].listOnly &&
+      probeOk.length === 1 && passesSeam(probeOk[0].env) &&
+      probeList.length === 1 && probeList[0].listOnly) {
+    ok('自己floor: 口の有無と --list の判定規則が働いている（口なしの実走を拾い、口ありと列挙のみは拾わない）')
+  } else bad(`自己floor の検知規則が壊れている: bad=${probeBad.length} ok=${probeOk.length} list=${probeList.length}`)
+
+  const sites = spawnSites(selfSrc)
+  const httpSites = sites.filter((x) => !x.listOnly)
+  // 母集団 floor: 発見が痩せると「違反0件」と「何も見ていない」が区別できなくなる。
+  // 分母は「何を含み何を含まないか」まで名乗る（列挙だけの --list は口の要否の対象外）。
+  if (sites.length >= 20 && httpSites.length >= 6) {
+    ok(`自己floor: check-links の spawn を ${sites.length}箇所 見つけている（うち HTTP を打つ実走 ${httpSites.length}箇所 / 列挙のみ ${sites.length - httpSites.length}箇所）`)
+  } else bad(`spawn の発見が痩せている: 全${sites.length}箇所 / 実走${httpSites.length}箇所（規約変更で走査が空洞化した可能性）`)
+
+  const naked = httpSites.filter((x) => !passesSeam(x.env))
+  if (naked.length === 0) {
+    ok(`自己floor: HTTP を打つ ${httpSites.length}箇所すべてが抽出層の口を渡している（正本の app/ を読んで外へ出る配線テストが0件）`)
+  } else bad(`口を渡していない実走 spawn が残っている: ${naked.map((x) => `L${x.n}`).join(' ')}`)
+}
+
+// 66 実走floor(Day131): 口を渡したときに **監視対象へ外部ホストが1件も載らない** ことを実測する。
+// 上の静的 floor は「口を渡したか」しか見ない。渡し方が正しくてもフィクスチャ側が絶対URLで
+// 実在ドメインを名乗れば（canonical / og:url / robots の Sitemap 申告は `--base` の置換対象に
+// ならない）そこだけ外へ出る——実測: 正本を読ませると https://egshugy.com が3件そのまま載った。
+{
+  const fx = fs.mkdtempSync(path.join(os.tmpdir(), 'links-d131-'))
+  const server = http.createServer((_, res) => { res.writeHead(200); res.end('ok') })
+  await new Promise((r) => server.listen(0, '127.0.0.1', r))
+  const BASE = `http://127.0.0.1:${server.address().port}`
+  const { env: fxEnv } = writeSrcFixture(fx, BASE)
+  const r = spawnSync(process.execPath, [path.join(__dirname, 'check-links.mjs'), '--base', BASE, '--list'],
+    { encoding: 'utf8', env: { ...process.env, ...fxEnv } })
+  const hosts = [...new Set([...r.stdout.matchAll(/https?:\/\/([^/\s\t]+)/g)].map((m) => m[1]))]
+  const foreign = hosts.filter((h) => !h.startsWith('127.0.0.1:'))
+  if (hosts.length > 0 && foreign.length === 0) {
+    ok(`実走floor: フィクスチャの監視対象は ${hosts.length}ホストすべてがローカル（外部への流出0件）`)
+  } else bad(`フィクスチャの監視対象に外部ホストが載っている: ${foreign.join(' ') || '(そもそも対象0件＝走査が空洞)'}`)
+  server.close()
+  fs.rmSync(fx, { recursive: true, force: true })
 }
 
 console.log(`\n[selftest-check-links] 結果: pass=${pass} fail=${fail}`)
