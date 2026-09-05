@@ -574,10 +574,13 @@ function walkRel(dir, prefix = '') {
   else bad(`正常な接頭辞で落ちた: status=${sane.status}`)
 
   // PM Day101: 実ルート floor の母集団は app/ の4件しかなく、**実ルートでない内部リンク**
-  // (/word-wolf/ 等の稼働中ゲーム＝Day45 で実 404 を出した箇所)を飲み込む形は素通りしていた。
+  // (稼働中ゲーム＝Day45 で実 404 を出した箇所)を飲み込む形は素通りしていた。
   // 既定より緩い override は全ターゲットで拒否されること。
-  const game = run('/egtype/,/word-wolf/')
-  if (game.status === 1 && /word-wolf.*格下げ/.test(game.stdout)) ok('実ルートでない内部リンク(/word-wolf/)を飲み込む override も拒否する')
+  // 2026-09-05: 例に使っていた /word-wolf/ は Web ゲーム群の引退で正本の台帳から消えた
+  // （この検査は --list で正本を読むので母集団に居ない路は検査できない）。残っている
+  // 実ルートでない内部リンクは /pekarin-chinchiro/（トップの JSX から張る手組み PWA）。
+  const game = run('/egtype/,/pekarin-chinchiro/')
+  if (game.status === 1 && /pekarin-chinchiro.*格下げ/.test(game.stdout)) ok('実ルートでない内部リンク(/pekarin-chinchiro/)を飲み込む override も拒否する')
   else bad(`実ルート以外を飲み込む override が素通りした: status=${game.status}`)
 
   // 逆向き(soft を減らす=逃がし弁の消失)も拒否する。PM Day101 の当初判断は「厳格化は監視が

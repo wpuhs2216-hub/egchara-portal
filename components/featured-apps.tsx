@@ -1,6 +1,6 @@
 "use client"
 
-import { ChevronRight, Dice5, Dog, Crown, Ban, Flame, Train, Spade, Users, Heart, Shuffle, Brain, Sparkles, Skull, Hexagon, Soup } from "lucide-react"
+import { Dice5, Skull } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 
 interface AppItem {
@@ -18,30 +18,19 @@ interface AppCategory {
 }
 
 const categories: AppCategory[] = [
+  // 2026-09-05: Web のパーティーゲーム群は引退（旧 URL はトップへ 301）。残るのはエグキャラ IP の 2 本。
+  // このコンポーネントはどのページからも import されていない（check-links も import 時だけ抽出する）。
   {
     label: "ゲーム",
     emoji: "🎮",
     apps: [
       { name: "ぺかりんのえぐしゅぎチンチロ", icon: Dice5, color: "from-purple-500 to-pink-500", href: "/pekarin-chinchiro/", comingSoon: false },
-      { name: "ワードウルフ", icon: Dog, color: "from-cyan-500 to-blue-500", href: "/word-wolf/", comingSoon: false },
-      { name: "キングスカップ", icon: Crown, color: "from-amber-500 to-orange-500", href: "/kingscup/", comingSoon: false },
-      { name: "NGワード", icon: Ban, color: "from-red-500 to-rose-500", href: "/ng-word/", comingSoon: false },
-      { name: "真実か挑戦か", icon: Flame, color: "from-yellow-500 to-amber-500", href: "/truth-or-dare/", comingSoon: false },
-      { name: "山手線ゲーム", icon: Train, color: "from-emerald-500 to-green-500", href: "/yamanote/", comingSoon: false },
-      { name: "ブラックジャック", icon: Spade, color: "from-indigo-500 to-violet-500", href: "/blackjack/", comingSoon: false },
-      { name: "パーティー", icon: Users, color: "from-violet-500 to-fuchsia-500", href: "/party/", comingSoon: false },
-      { name: "6ボールパズル", icon: Hexagon, color: "from-sky-500 to-indigo-500", href: "/ramune-puzzle/", comingSoon: false },
-      { name: "えぐラーメン食堂", icon: Soup, color: "from-orange-500 to-red-500", href: "/egramen/", comingSoon: false },
     ],
   },
   {
     label: "ツール & 診断",
     emoji: "🔧",
     apps: [
-      { name: "相性診断", icon: Heart, color: "from-pink-500 to-red-500", href: "/compatibility/", comingSoon: false },
-      { name: "チーム分け", icon: Shuffle, color: "from-teal-500 to-cyan-500", href: "/team-maker/", comingSoon: false },
-      { name: "性格診断", icon: Brain, color: "from-purple-500 to-indigo-500", href: "/personality/", comingSoon: false },
-      { name: "あだ名メーカー", icon: Sparkles, color: "from-amber-500 to-yellow-500", href: "/nickname-gen/", comingSoon: false },
       { name: "エグタイプ診断", icon: Skull, color: "from-pink-500 to-fuchsia-500", href: "/egtype/", comingSoon: false },
     ],
   },

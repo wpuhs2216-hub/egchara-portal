@@ -163,15 +163,13 @@ function rankColor(rank: Character["dangerRank"]): string {
 }
 
 // PLAYGROUND: ゲーム・ツール群。
-// ぺかりんちんちろは CHARACTERS のスピンオフ作品として格上げしたためここから除外。
+// 2026-09-05: Web のパーティーゲーム群（ワードウルフ/キングスカップ/相性診断/あだ名メーカー/6ボールパズル/
+// えぐラーメン食堂/山手線 ほか）は引退した。旧 URL は Cloudflare Pages の _redirects でトップへ 301
+// （生成元は egchara-factory の site/manifest.json）。受け皿はエグフェス（パーティーゲーム×オリカバトル
+// 基盤・iOS・準備中）で、エグキャラとは社内コラボの関係。ここに稼働中の内部リンクを戻すときは
+// factory の台帳にも載せること（台帳に無いパスは配信されない）。
 const EXPERIMENTS: Experiment[] = [
-  { id: "wordwolf", ja: "ワードウルフ", en: "WORD WOLF", category: "Game", status: "active", href: "/word-wolf/" },
-  { id: "kingscup", ja: "キングスカップ", en: "KINGS CUP", category: "Game", status: "active", href: "/kingscup/" },
-  { id: "compat", ja: "相性診断", en: "COMPATIBILITY", category: "Diagnostic", status: "active", href: "/compatibility/" },
-  { id: "nickname", ja: "あだ名メーカー", en: "NICKNAME GEN", category: "Tool", status: "active", href: "/nickname-gen/" },
-  { id: "puzzle", ja: "6 ボールパズル", en: "6-BALL PUZZLE", category: "Game", status: "beta", href: "/ramune-puzzle/" },
-  { id: "egramen", ja: "えぐラーメン食堂", en: "EGRAMEN", category: "Game", status: "beta", href: "/egramen/" },
-  { id: "yamanote", ja: "山手線ゲーム", en: "YAMANOTE", category: "Game", status: "soon" },
+  { id: "egfes", ja: "エグフェス", en: "EG FES", category: "Game", status: "soon" },
 ]
 
 // 稼働日数カウンタ（リリース起点を 2026-02-20 = egtype 初版日とする）
@@ -473,6 +471,26 @@ export default function Home() {
             </div>
           </div>
         </a>
+
+        {/* 受け皿: エグフェス（パーティーゲーム×オリカバトルの基盤・別ブランド）。
+            Web のパーティーゲーム群は 2026-09-05 に引退し、旧 URL はここ(トップ)へ 301 で戻ってくる。
+            エグキャラは社内コラボで登場する立場なので、メイン扱いにはしない。リリースまでリンク無し。 */}
+        <div className="mt-6 bg-card border-[3px] border-dashed border-border rounded-[2rem] p-6 md:p-7 clay">
+          <div className="mb-3">
+            <span className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-pop-orange/15 text-pop-orange font-display font-extrabold text-[12px]">
+              <span className="w-2 h-2 rounded-full bg-pop-orange shimmer" />
+              コラボ・準備中
+            </span>
+          </div>
+          <h3 className="font-display font-black text-[clamp(20px,2.6vw,26px)] tracking-tight mb-1">
+            パーティーゲームは「エグフェス」へ
+          </h3>
+          <p className="text-[15px] text-muted-foreground leading-relaxed">
+            ワードウルフ・キングスカップなどの Web 版パーティーゲームは役目を終えて引退しました。
+            パーティーゲームとオリジナルカードバトルの基盤アプリ「エグフェス」（iOS・準備中）に、
+            エグキャラはコラボとして登場予定です。
+          </p>
+        </div>
       </section>
 
       {/* PRODUCTS: 夜職プロダクト(NOXA系) — SHOW_PRODUCTS=false の間は非表示 */}
